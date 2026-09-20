@@ -2367,10 +2367,23 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // handle any pending shifts/copies
     memory_update(false);
 
+    // dynamic n_ubatch: reduce as context grows to improve SM occupancy on long-context prefill
+    uint32_t n_ubatch_eff = cparams.n_ubatch;
+    const uint32_t n_kv_cur = memory->get_n_kv();
+    if (n_kv_cur > 32768) {
+        n_ubatch_eff = std::max(128, n_ubatch_eff / 2);
+    }
+    if (n_kv_cur > 65536) {
+        n_ubatch_eff = std::max(128, n_ubatch_eff / 4);
+    }
+    if (n_kv_cur > 131072) {
+        n_ubatch_eff = std::max(64, n_ubatch_eff / 8);
+    }
+
     llama_memory_context_ptr mctx;
 
     while (true) {
-        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        mctx = memory->init_batch(*balloc, n_ubatch_eff, output_all);
         if (!mctx) {
             return -2;
         }
