@@ -62,6 +62,7 @@ jobs:
             -DGGML_NATIVE=OFF ^
             -DGGML_CPU=ON ^
             -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=90 ^
             -DLLAMA_BUILD_SERVER=ON ^
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=OFF ^
