@@ -9,89 +9,55 @@ on:
         required: true
         default: "b1"
 
-env:
-  CUDA_VER: "12.4"
-  CUDA_CUDART_VER: "12.4.127"
-  CUDA_CUBLAS_VER: "12.4.5.8"
-  CUDA_NVCC_VER: "12.4.131"
-
 jobs:
   build-windows-cuda:
     runs-on: windows-2022
+    permissions:
+      actions: write
+
     steps:
-      - name: Checkout
+      - name: Clone
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install CUDA 12.4 (redist)
-        shell: powershell
+      - name: Install CUDA Toolkit 12.4
+        shell: pwsh
         run: |
-          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${env:CUDA_VER}"
-          $redist = "https://developer.download.nvidia.com/compute/cuda/redist"
+          mkdir -p "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          choco install unzip -y
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.4.127-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.127-archive.zip"
+          unzip '*.zip' -d "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_cudart-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_nvcc-windows-x86_64-12.4.131-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_nvrtc-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\libcublas-windows-x86_64-12.4.5.8-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_nvtx-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_profiler_api-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\visual_studio_integration-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_nvprof-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\cuda_cccl-windows-x86_64-12.4.127-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" /E /I /H /Y
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_PATH_V12_4=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          # Create standard CUDA directory structure
-          New-Item -ItemType Directory -Force -Path "$cuda\bin" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda\include" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda\lib\x64" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda\nvvm\libdevice" | Out-Null
-
-          # --- nvcc ---
-          $url = "$redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${env:CUDA_NVCC_VER}-archive.zip"
-          Write-Host "Downloading nvcc: $url"
-          Invoke-WebRequest -Uri $url -OutFile "nvcc.zip"
-          Expand-Archive -Path "nvcc.zip" -DestinationPath "$env:TEMP\nvcc" -Force
-          Remove-Item "nvcc.zip"
-          Copy-Item "$env:TEMP\nvcc\nvcc\bin\*" "$cuda\bin\" -Recurse -Force
-          Copy-Item "$env:TEMP\nvcc\nvcc\nvvm\libdevice\*" "$cuda\nvvm\libdevice\" -Force
-          Copy-Item "$env:TEMP\nvcc\nvcc\include\*" "$cuda\include\" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item "$env:TEMP\nvcc" -Recurse -Force
-
-          # --- cudart ---
-          $url = "$redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${env:CUDA_CUDART_VER}-archive.zip"
-          Write-Host "Downloading cudart: $url"
-          Invoke-WebRequest -Uri $url -OutFile "cudart.zip"
-          Expand-Archive -Path "cudart.zip" -DestinationPath "$env:TEMP\cudart" -Force
-          Remove-Item "cudart.zip"
-          Copy-Item "$env:TEMP\cudart\cuda_cudart\bin\*" "$cuda\bin\" -Recurse -Force
-          Copy-Item "$env:TEMP\cudart\cuda_cudart\include\*" "$cuda\include\" -Recurse -Force
-          Copy-Item "$env:TEMP\cudart\cuda_cudart\lib\x64\*" "$cuda\lib\x64\" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$env:TEMP\cudart" -Recurse -Force
-
-          # --- cublas ---
-          $url = "$redist/libcublas/windows-x86_64/libcublas-windows-x86_64-${env:CUDA_CUBLAS_VER}-archive.zip"
-          Write-Host "Downloading cublas: $url"
-          Invoke-WebRequest -Uri $url -OutFile "cublas.zip"
-          Expand-Archive -Path "cublas.zip" -DestinationPath "$env:TEMP\cublas" -Force
-          Remove-Item "cublas.zip"
-          Copy-Item "$env:TEMP\cublas\libcublas\bin\*" "$cuda\bin\" -Recurse -Force
-          Copy-Item "$env:TEMP\cublas\libcublas\include\*" "$cuda\include\" -Recurse -Force
-          Copy-Item "$env:TEMP\cublas\libcublas\lib\x64\*" "$cuda\lib\x64\" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$env:TEMP\cublas" -Recurse -Force
-
-          # Verify
-          Write-Host "`n=== CUDA bin ==="
-          Get-ChildItem "$cuda\bin" -File | Select-Object Name, Length
-          Write-Host "`n=== CUDA lib/x64 ==="
-          Get-ChildItem "$cuda\lib\x64" -File | Select-Object Name, Length
-          Write-Host "`n=== CUDA include (count) ==="
-          (Get-ChildItem "$cuda\include" -File).Count
+      - name: Install Ninja
+        run: choco install ninja -y
 
       - name: Build
         shell: cmd
-        env:
-          CUDAToolkit_ROOT: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4'
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          if errorlevel 1 (
-            echo "Failed to initialize MSVC environment"
-            exit /b 1
-          )
-          set "PATH=%CUDAToolkit_ROOT%\bin;%PATH%"
-
           cmake -S . -B build -G "Ninja Multi-Config" ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DCUDAToolkit_ROOT="%CUDAToolkit_ROOT%" ^
             -DGGML_BACKEND_DL=ON ^
             -DGGML_NATIVE=OFF ^
             -DGGML_CPU=ON ^
@@ -100,34 +66,29 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=OFF ^
             -DLLAMA_BUILD_BORINGSSL=ON
-
-          cmake --build build --config Release --parallel
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
 
       - name: Package
-        shell: powershell
+        shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.tag }}"
           $out = "llama-$tag-bin-win-cuda-12.4-x64"
           New-Item -ItemType Directory -Force -Path "$out" | Out-Null
 
-          # Copy binaries
           $bin_dir = "build\Release"
           Copy-Item "$bin_dir\llama-server.exe" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "$bin_dir\llama-cli.exe" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "$bin_dir\llama-quantize.exe" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "$bin_dir\llama-bench.exe" "$out\" -ErrorAction SilentlyContinue
-
-          # Copy ggml DLLs
           Get-ChildItem "$bin_dir\ggml-*.dll" | Copy-Item -Destination "$out\"
           Get-ChildItem "$bin_dir\llama.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
 
-          # Copy CUDA runtime DLLs (only what's needed at runtime)
           $cuda_bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
           Get-ChildItem "$cuda_bin" -Filter "cudart64_*.dll" | Copy-Item -Destination "$out\" -Force
           Get-ChildItem "$cuda_bin" -Filter "cublas64_*.dll" | Copy-Item -Destination "$out\" -Force
           Get-ChildItem "$cuda_bin" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "$out\" -Force
 
-          # Compress
           Compress-Archive -Path "$out\*" -DestinationPath "llama-$tag-bin-win-cuda-12.4-x64.zip" -Force
 
           Write-Host "`n=== Package contents ==="
@@ -140,17 +101,15 @@ jobs:
           path: llama-*-bin-win-cuda-12.4-x64.zip
 
       - name: Create GitHub Release
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.event.inputs.tag }}"
           $artifact = "llama-$tag-bin-win-cuda-12.4-x64.zip"
-
           gh release create "$tag" `
             --title "llamAmpere $tag - Windows x64 (CUDA 12.4)" `
-            --notes "Auto-built for Windows x64 with CUDA 12.4.`n`nContents:`n- llama-server.exe`n- ggml-cuda.dll + CUDA runtime DLLs`n- llama-cli.exe, llama-quantize.exe, llama-bench.exe" `
+            --notes "Auto-built for Windows x64 with CUDA 12.4" `
             --draft `
             "$artifact"
-
           Write-Host "Draft release created: $tag"
