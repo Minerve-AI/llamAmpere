@@ -13,7 +13,7 @@ env:
   CUDA_VER: "12.4"
   CUDA_CUDART_VER: "12.4.127"
   CUDA_CUBLAS_VER: "12.4.5.8"
-  NVCUFPX_VER: "12.4.127"
+  CUDA_NVCC_VER: "12.4.131"
 
 jobs:
   build-windows-cuda:
@@ -51,7 +51,7 @@ jobs:
           Remove-Item "cublas.zip"
 
           # nvcc (for compilation)
-          $url = "$redist_base/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${env:CUDA_CUDART_VER}-archive.zip"
+          $url = "$redist_base/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${env:CUDA_NVCC_VER}-archive.zip"
           Write-Host "Downloading nvcc: $url"
           Invoke-WebRequest -Uri $url -OutFile "nvcc.zip"
           Expand-Archive -Path "nvcc.zip" -DestinationPath "$cuda_base" -Force
