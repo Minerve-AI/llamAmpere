@@ -24,56 +24,74 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install CUDA 12.4 redistributables
+      - name: Install CUDA 12.4 (redist)
         shell: powershell
         run: |
-          $cuda_base = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${env:CUDA_VER}"
-          New-Item -ItemType Directory -Force -Path "$cuda_base\bin" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda_base\bin\x64" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda_base\lib" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda_base\lib\x64" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$cuda_base\nvvm\libdevice" | Out-Null
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${env:CUDA_VER}"
+          $redist = "https://developer.download.nvidia.com/compute/cuda/redist"
 
-          $redist_base = "https://developer.download.nvidia.com/compute/cuda/redist"
+          # Create standard CUDA directory structure
+          New-Item -ItemType Directory -Force -Path "$cuda\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$cuda\include" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$cuda\lib\x64" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$cuda\nvvm\libdevice" | Out-Null
 
-          # cudart
-          $url = "$redist_base/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${env:CUDA_CUDART_VER}-archive.zip"
-          Write-Host "Downloading cudart: $url"
-          Invoke-WebRequest -Uri $url -OutFile "cudart.zip"
-          Expand-Archive -Path "cudart.zip" -DestinationPath "$cuda_base" -Force
-          Remove-Item "cudart.zip"
-
-          # cublas
-          $url = "$redist_base/libcublas/windows-x86_64/libcublas-windows-x86_64-${env:CUDA_CUBLAS_VER}-archive.zip"
-          Write-Host "Downloading cublas: $url"
-          Invoke-WebRequest -Uri $url -OutFile "cublas.zip"
-          Expand-Archive -Path "cublas.zip" -DestinationPath "$cuda_base" -Force
-          Remove-Item "cublas.zip"
-
-          # nvcc (for compilation)
-          $url = "$redist_base/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${env:CUDA_NVCC_VER}-archive.zip"
+          # --- nvcc ---
+          $url = "$redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${env:CUDA_NVCC_VER}-archive.zip"
           Write-Host "Downloading nvcc: $url"
           Invoke-WebRequest -Uri $url -OutFile "nvcc.zip"
-          Expand-Archive -Path "nvcc.zip" -DestinationPath "$cuda_base" -Force
+          Expand-Archive -Path "nvcc.zip" -DestinationPath "$env:TEMP\nvcc" -Force
           Remove-Item "nvcc.zip"
+          Copy-Item "$env:TEMP\nvcc\nvcc\bin\*" "$cuda\bin\" -Recurse -Force
+          Copy-Item "$env:TEMP\nvcc\nvcc\nvvm\libdevice\*" "$cuda\nvvm\libdevice\" -Force
+          Copy-Item "$env:TEMP\nvcc\nvcc\include\*" "$cuda\include\" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:TEMP\nvcc" -Recurse -Force
+
+          # --- cudart ---
+          $url = "$redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${env:CUDA_CUDART_VER}-archive.zip"
+          Write-Host "Downloading cudart: $url"
+          Invoke-WebRequest -Uri $url -OutFile "cudart.zip"
+          Expand-Archive -Path "cudart.zip" -DestinationPath "$env:TEMP\cudart" -Force
+          Remove-Item "cudart.zip"
+          Copy-Item "$env:TEMP\cudart\cuda_cudart\bin\*" "$cuda\bin\" -Recurse -Force
+          Copy-Item "$env:TEMP\cudart\cuda_cudart\include\*" "$cuda\include\" -Recurse -Force
+          Copy-Item "$env:TEMP\cudart\cuda_cudart\lib\x64\*" "$cuda\lib\x64\" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:TEMP\cudart" -Recurse -Force
+
+          # --- cublas ---
+          $url = "$redist/libcublas/windows-x86_64/libcublas-windows-x86_64-${env:CUDA_CUBLAS_VER}-archive.zip"
+          Write-Host "Downloading cublas: $url"
+          Invoke-WebRequest -Uri $url -OutFile "cublas.zip"
+          Expand-Archive -Path "cublas.zip" -DestinationPath "$env:TEMP\cublas" -Force
+          Remove-Item "cublas.zip"
+          Copy-Item "$env:TEMP\cublas\libcublas\bin\*" "$cuda\bin\" -Recurse -Force
+          Copy-Item "$env:TEMP\cublas\libcublas\include\*" "$cuda\include\" -Recurse -Force
+          Copy-Item "$env:TEMP\cublas\libcublas\lib\x64\*" "$cuda\lib\x64\" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:TEMP\cublas" -Recurse -Force
 
           # Verify
-          Write-Host "CUDA install structure:"
-          Get-ChildItem "$cuda_base\bin" -Filter "*.dll" | Select-Object Name
-          Get-ChildItem "$cuda_base\bin\x64" -Filter "*.dll" | Select-Object Name
+          Write-Host "`n=== CUDA bin ==="
+          Get-ChildItem "$cuda\bin" -File | Select-Object Name, Length
+          Write-Host "`n=== CUDA lib/x64 ==="
+          Get-ChildItem "$cuda\lib\x64" -File | Select-Object Name, Length
+          Write-Host "`n=== CUDA include (count) ==="
+          (Get-ChildItem "$cuda\include" -File).Count
 
       - name: Build
         shell: cmd
+        env:
+          CUDAToolkit_ROOT: "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
           if errorlevel 1 (
             echo "Failed to initialize MSVC environment"
             exit /b 1
           )
-          set "PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin;%PATH%"
+          set "PATH=%CUDAToolkit_ROOT%\bin;%PATH%"
 
           cmake -S . -B build -G "Ninja Multi-Config" ^
             -DCMAKE_BUILD_TYPE=Release ^
+            -DCUDAToolkit_ROOT="%CUDAToolkit_ROOT%" ^
             -DGGML_BACKEND_DL=ON ^
             -DGGML_NATIVE=OFF ^
             -DGGML_CPU=ON ^
@@ -103,21 +121,17 @@ jobs:
           Get-ChildItem "$bin_dir\ggml-*.dll" | Copy-Item -Destination "$out\"
           Get-ChildItem "$bin_dir\llama.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
 
-          # Copy CUDA runtime DLLs
+          # Copy CUDA runtime DLLs (only what's needed at runtime)
           $cuda_bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
-          $cuda_bin_x64 = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\x64"
-          Get-ChildItem "$cuda_bin" -Filter "cudart64_*.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
-          Get-ChildItem "$cuda_bin" -Filter "cublas64_*.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
-          Get-ChildItem "$cuda_bin" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
-          Get-ChildItem "$cuda_bin_x64" -Filter "cudart64_*.dll" | Copy-Item -Destination "$out\" -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "$cuda_bin_x64" -Filter "cublas64_*.dll" | Copy-Item -Destination "$out\" -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "$cuda_bin_x64" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "$out\" -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$cuda_bin" -Filter "cudart64_*.dll" | Copy-Item -Destination "$out\" -Force
+          Get-ChildItem "$cuda_bin" -Filter "cublas64_*.dll" | Copy-Item -Destination "$out\" -Force
+          Get-ChildItem "$cuda_bin" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "$out\" -Force
 
           # Compress
           Compress-Archive -Path "$out\*" -DestinationPath "llama-$tag-bin-win-cuda-12.4-x64.zip" -Force
 
-          Write-Host "Package contents:"
-          Get-ChildItem "llama-$tag-bin-win-cuda-12.4-x64.zip" | Select-Object Name, Length
+          Write-Host "`n=== Package contents ==="
+          Get-ChildItem "$out" -File | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
