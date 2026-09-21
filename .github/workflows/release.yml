@@ -77,11 +77,11 @@ jobs:
           $out = "llama-$tag-bin-win-cuda-12.4-x64"
           New-Item -ItemType Directory -Force -Path "$out" | Out-Null
 
-          $bin_dir = "build\Release"
-          Copy-Item "$bin_dir\llama-server.exe" "$out\" -ErrorAction SilentlyContinue
-          Copy-Item "$bin_dir\llama-cli.exe" "$out\" -ErrorAction SilentlyContinue
-          Copy-Item "$bin_dir\llama-quantize.exe" "$out\" -ErrorAction SilentlyContinue
-          Copy-Item "$bin_dir\llama-bench.exe" "$out\" -ErrorAction SilentlyContinue
+          $bin_dir = "build\bin\Release"
+          Copy-Item "$bin_dir\llama-server.exe" "$out\"
+          Copy-Item "$bin_dir\llama-cli.exe" "$out\"
+          Copy-Item "$bin_dir\llama-quantize.exe" "$out\"
+          Copy-Item "$bin_dir\llama-bench.exe" "$out\"
           Get-ChildItem "$bin_dir\ggml-*.dll" | Copy-Item -Destination "$out\"
           Get-ChildItem "$bin_dir\llama.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
 
