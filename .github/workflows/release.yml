@@ -80,7 +80,7 @@ jobs:
       - name: Build
         shell: cmd
         env:
-          CUDAToolkit_ROOT: "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          CUDAToolkit_ROOT: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4'
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
           if errorlevel 1 (
