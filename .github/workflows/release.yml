@@ -44,7 +44,7 @@ jobs:
           Remove-Item "cudart.zip"
 
           # cublas
-          $url = "$redist_base/cuda_cublas/windows-x86_64/cuda_cublas-windows-x86_64-${env:CUDA_CUBLAS_VER}-archive.zip"
+          $url = "$redist_base/libcublas/windows-x86_64/libcublas-windows-x86_64-${env:CUDA_CUBLAS_VER}-archive.zip"
           Write-Host "Downloading cublas: $url"
           Invoke-WebRequest -Uri $url -OutFile "cublas.zip"
           Expand-Archive -Path "cublas.zip" -DestinationPath "$cuda_base" -Force
