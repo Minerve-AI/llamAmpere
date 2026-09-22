@@ -412,8 +412,6 @@ public:
     // llama_kv_cache_context specific API
     //
 
-    uint32_t get_n_kv() const;
-
     ggml_type type_k() const;
     ggml_type type_v() const;
 
