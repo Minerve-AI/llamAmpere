@@ -81,7 +81,7 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=86 ^
             -DLLAMA_BUILD_SERVER=ON ^
             -DLLAMA_BUILD_TESTS=OFF ^
-            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=ON ^
             -DLLAMA_BUILD_BORINGSSL=ON
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS%
@@ -94,22 +94,31 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out" | Out-Null
 
           $bin_dir = "build\bin\Release"
-          Copy-Item "$bin_dir\llama-server.exe" "$out\"
-          Copy-Item "$bin_dir\llama-cli.exe" "$out\"
-          Copy-Item "$bin_dir\llama-quantize.exe" "$out\"
-          Copy-Item "$bin_dir\llama-bench.exe" "$out\"
-          Get-ChildItem "$bin_dir\ggml-*.dll" | Copy-Item -Destination "$out\"
-          Get-ChildItem "$bin_dir\llama.dll" | Copy-Item -Destination "$out\" -ErrorAction SilentlyContinue
 
+          # Copy all executables
+          Get-ChildItem "$bin_dir" -Filter "*.exe" | Copy-Item -Destination "$out\"
+
+          # Copy all DLLs (ggml, llama, etc.)
+          Get-ChildItem "$bin_dir" -Filter "*.dll" | Copy-Item -Destination "$out\"
+
+          # Copy web UI if present
+          if (Test-Path "$bin_dir\llama-server-web") {
+            Copy-Item "$bin_dir\llama-server-web" "$out\llama-server-web" -Recurse
+          }
+
+          # Copy CUDA runtime DLLs
           $cuda_bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
           Get-ChildItem "$cuda_bin" -Filter "cudart64_*.dll" | Copy-Item -Destination "$out\" -Force
           Get-ChildItem "$cuda_bin" -Filter "cublas64_*.dll" | Copy-Item -Destination "$out\" -Force
           Get-ChildItem "$cuda_bin" -Filter "cublasLt64_*.dll" | Copy-Item -Destination "$out\" -Force
+          Get-ChildItem "$cuda_bin" -Filter "nvrtc64_*.dll" | Copy-Item -Destination "$out\" -Force
 
           Compress-Archive -Path "$out\*" -DestinationPath "llama-$tag-bin-win-cuda-12.4-x64.zip" -Force
 
           Write-Host "`n=== Package contents ==="
-          Get-ChildItem "$out" -File | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}}
+          $all_files = Get-ChildItem "$out" -Recurse -File
+          $all_files | Select-Object @{N='File';E={$_.FullName.Replace("$out\","")}}, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}}
+          Write-Host "`nTotal: $($all_files.Count) files, $([math]::Round(($all_files | Measure-Object -Property Length -Sum).Sum/1MB, 2)) MB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
