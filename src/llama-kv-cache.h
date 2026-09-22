@@ -133,6 +133,8 @@ public:
 
     bool get_can_shift() const override;
 
+    uint32_t get_n_kv() const override;
+
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
@@ -429,6 +431,9 @@ public:
 
     // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
     ggml_tensor * get_turbo_innerq_scale_inv() const override;
+
+    // get the current number of KV tokens in the cache
+    uint32_t get_n_kv() const override;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
