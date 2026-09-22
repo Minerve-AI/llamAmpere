@@ -4242,7 +4242,8 @@ void llm_graph_context::build_sampling() const {
         // row-block sampling: a sequence with several output rows (speculative verification) runs its
         // chain once over the [n_vocab, n_rows] block of its rows and exports only the sampled ids
         if (const auto it_rows = seq_rows.find(seq_id); it_rows != seq_rows.end() &&
-                (it_rows->second.size() > 1 || argmax_only)) {
+                (it_rows->second.size() > 1 || argmax_only) &&
+                llama_sampler_backend_supports_rows(sampler)) {
             const auto & rows = it_rows->second;
             const int64_t n_rows = (int64_t) rows.size();
 
