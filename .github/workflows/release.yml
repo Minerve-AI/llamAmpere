@@ -8,6 +8,21 @@ on:
         type: string
         required: true
         default: "b1"
+      title:
+        description: "Release title (leave empty for auto)"
+        type: string
+        required: false
+        default: ""
+      notes:
+        description: "Release notes (leave empty for auto)"
+        type: string
+        required: false
+        default: ""
+      draft:
+        description: "Keep as draft (unchecked = publish immediately)"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   build-windows-cuda:
@@ -108,10 +123,16 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           $tag = "${{ github.event.inputs.tag }}"
+          $title_input = "${{ github.event.inputs.title }}"
+          $notes_input = "${{ github.event.inputs.notes }}"
+          $draft_flag = "${{ github.event.inputs.draft }}"
           $artifact = "llama-$tag-bin-win-cuda-12.4-x64.zip"
-          gh release create "$tag" `
-            --title "llamAmpere $tag - Windows x64 (CUDA 12.4)" `
-            --notes "Auto-built for Windows x64 with CUDA 12.4" `
-            --draft `
-            "$artifact"
-          Write-Host "Draft release created: $tag"
+
+          if (-not $title_input) { $title_input = "llamAmpere $tag - Windows x64 (CUDA 12.4)" }
+          if (-not $notes_input) { $notes_input = "Auto-built for Windows x64 with CUDA 12.4" }
+
+          $args = @("release", "create", "$tag", "--title", $title_input, "--notes", $notes_input)
+          if ($draft_flag -eq "true") { $args += "--draft" }
+          $args += "$artifact"
+          gh & $args
+          Write-Host "Release created: $tag"
