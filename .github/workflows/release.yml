@@ -140,8 +140,8 @@ jobs:
           if (-not $title_input) { $title_input = "llamAmpere $tag - Windows x64 (CUDA 12.4)" }
           if (-not $notes_input) { $notes_input = "Auto-built for Windows x64 with CUDA 12.4" }
 
-          $args = @("release", "create", "$tag", "--title", $title_input, "--notes", $notes_input)
-          if ($draft_flag -eq "true") { $args += "--draft" }
-          $args += "$artifact"
-          gh & $args
+          $cmd = @("release", "create", "$tag", "--title", $title_input, "--notes", $notes_input)
+          if ($draft_flag -eq "true") { $cmd += "--draft" }
+          $cmd += "$artifact"
+          & gh @cmd
           Write-Host "Release created: $tag"
