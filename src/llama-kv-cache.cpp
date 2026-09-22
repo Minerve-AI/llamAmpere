@@ -3123,7 +3123,11 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 }
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
-    return n_kv;
+    // Bin n_kv to power-of-2 buckets to maximize CUDA graph reuse.
+    // The KQ mask handles the padded positions correctly.
+    uint32_t bucket = 256;
+    while (bucket < n_kv && bucket < 131072) bucket <<= 1;
+    return std::max(bucket, n_kv);
 }
 
 ggml_type llama_kv_cache_context::type_k() const {
