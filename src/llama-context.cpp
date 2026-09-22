@@ -2381,13 +2381,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
     uint32_t n_ubatch_eff = cparams.n_ubatch;
     const uint32_t n_kv_cur = memory->get_n_kv();
     if (n_kv_cur > 32768) {
-        n_ubatch_eff = std::max(128, n_ubatch_eff / 2);
+        n_ubatch_eff = std::max(128u, n_ubatch_eff / 2);
     }
     if (n_kv_cur > 65536) {
-        n_ubatch_eff = std::max(128, n_ubatch_eff / 4);
+        n_ubatch_eff = std::max(128u, n_ubatch_eff / 4);
     }
     if (n_kv_cur > 131072) {
-        n_ubatch_eff = std::max(64, n_ubatch_eff / 8);
+        n_ubatch_eff = std::max(64u, n_ubatch_eff / 8);
     }
 
     llama_memory_context_ptr mctx;
