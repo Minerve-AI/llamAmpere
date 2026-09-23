@@ -87,7 +87,7 @@ namespace ggml_cuda_fattn_i8qk {
     //   3. K_int8[k][c] = round((K[k][c] - mean[c]) / scale)
     //
     // Output layout:
-    //   k_int8: [seq_len, n_heads, head_dim] int8 (same layout as K but INT8)
+    //   k_int8: [n_heads, seq_len, head_dim] int8 (head-major)
     //   k_scale: [n_tiles, n_heads] float
     //
     template<bool K_IS_Q8>
@@ -173,7 +173,7 @@ namespace ggml_cuda_fattn_i8qk {
                 const int block_idx = h * seq_len * nblocks_per_row + (k_start + k) * nblocks_per_row + c / 32;
                 const block_q8_0_cuda blk = K_q8[block_idx];
                 const float val = (float)blk.qs[c % 32] * blk.d - k_mean[h * head_dim + c];
-                k_int8[(int64_t)(k_start + k) * n_heads * head_dim + h * head_dim + c] =
+                k_int8[(int64_t)h * seq_len * head_dim + (k_start + k) * head_dim + c] =
                     (int8_t)roundf(val * inv_scale);
             }
         } else {
@@ -185,7 +185,7 @@ namespace ggml_cuda_fattn_i8qk {
                 const int c = i % head_dim;
                 const half2 v = K_h2[(int64_t)h * seq_len * n_half2 + (k_start + k) * n_half2 + c / 2];
                 const float val = ((c % 2 == 0) ? __low2float(v) : __high2float(v)) - k_mean[h * head_dim + c];
-                k_int8[(int64_t)(k_start + k) * n_heads * head_dim + h * head_dim + c] =
+                k_int8[(int64_t)h * seq_len * head_dim + (k_start + k) * head_dim + c] =
                     (int8_t)roundf(val * inv_scale);
             }
         }
