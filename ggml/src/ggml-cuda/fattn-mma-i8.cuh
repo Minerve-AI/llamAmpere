@@ -143,7 +143,8 @@ namespace ggml_cuda_fattn_i8qk {
                 const float inv = 1.0f / s_q_scale[r];
                 s_Q[r * DKQ + d] = (int8_t)roundf(s_O[r * DV + d] * inv);
             }
-            // Init s_O to zero (it was used as temp)
+            __syncthreads();
+            // Init s_O to zero (it was used as temp for Q)
             for (int i = tid; i < NQ * DV; i += NTHREADS) s_O[i] = 0.0f;
         }
 
