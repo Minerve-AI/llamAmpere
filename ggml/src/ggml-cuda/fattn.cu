@@ -5,6 +5,7 @@
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
+#include "fattn-i8qk.cuh"
 
 #include <atomic>
 #include <cstdio>
@@ -1068,6 +1069,49 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                     default: break;
                 }
             }
+        }
+    }
+
+    // INT8-QK FlashAttention (SageAttention-style): QK^T on INT8 tensor cores.
+    // Conditions: Q8_0 K+V, head_dim=128, sm_86+, prefill (n_q > 4), F16 Q.
+    // K is mean-smoothed + per-64-key-tile INT8 quantized; Q is per-row INT8 in-kernel.
+    // V stays Q8_0, dequantized to FP16 in-kernel for the PV MMA.
+    {
+        const ggml_tensor * Q = dst->src[0];
+        const ggml_tensor * K = dst->src[1];
+        const ggml_tensor * V = dst->src[2];
+        const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+        if (K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 &&
+            Q->type == GGML_TYPE_F16 &&
+            Q->ne[0] == 128 && V->ne[0] == 128 &&
+            Q->ne[1] > 4 && cc >= 86) {
+            const int seq_q = (int)Q->ne[1];
+            const int seq_k = (int)K->ne[1];
+            const int n_heads = (int)Q->ne[2];
+            const int n_kv_heads = (int)K->ne[2];
+
+            // Static workspace (grows as needed)
+            static ggml_cuda_fattn_i8qk::i8qk_workspace ws;
+            static int ws_max_seq_k = 0;
+            static int ws_n_kv = 0;
+            static int ws_hd = 0;
+            if (seq_k > ws_max_seq_k || n_kv_heads != ws_n_kv || 128 != ws_hd) {
+                if (ws.allocated) ggml_cuda_fattn_i8qk::i8qk_free(ws);
+                ws = ggml_cuda_fattn_i8qk::i8qk_alloc(seq_k, n_kv_heads, 128);
+                ws_max_seq_k = seq_k;
+                ws_n_kv = n_kv_heads;
+                ws_hd = 128;
+            }
+
+            const float sm_scale = 1.0f / sqrtf(128.0f);
+            ggml_cuda_fattn_i8qk::flash_attn_i8qk_q8(
+                (const half2 *)Q->data,
+                K->data,
+                V->data,
+                (half2 *)dst->data,
+                seq_q, seq_k, n_heads, n_kv_heads, 128,
+                sm_scale, ws, ctx.stream[ctx.device]);
+            return;
         }
     }
 
