@@ -26,11 +26,6 @@ namespace ggml_cuda_fattn_i8qk {
     constexpr int NK = 64;   // keys per block
     constexpr int NWARPS = NTHREADS / 32; // 8
 
-    struct __align__(16) block_q8_0_cuda {
-        float d;
-        int8_t qs[32];
-    };
-
     // Pack 4 int8 into one .b32
     static __device__ __forceinline__ int pack_i4(int8_t a, int8_t b, int8_t c, int8_t d) {
         int r;
@@ -421,10 +416,9 @@ namespace ggml_cuda_fattn_i8qk {
                 const int c = i % n_h2;
                 const int row = q0 + r;
                 if (row < seq_q) {
-                    const float lo = s_O[r * DV + c * 2];
-                    const float hi = s_O[r * DV + c * 2 + 1];
                     O_h2[(int64_t)head * seq_q * n_h2 + row * n_h2 + c] =
-                        __float2half2_rn(make_float2(lo, hi));
+                        make_half2(__float2half_rn(s_O[r * DV + c * 2]),
+                                   __float2half_rn(s_O[r * DV + c * 2 + 1]));
                 }
             }
         }
