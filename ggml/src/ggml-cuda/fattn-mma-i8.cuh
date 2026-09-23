@@ -367,7 +367,7 @@ namespace ggml_cuda_fattn_i8qk {
                         // a3 = P[t/4+8][4*(t%4)+8 .. +9] as half2
                         const int a_r0 = lane / 4;
                         const int a_r1 = a_r0 + 8;
-                        const int a_c  = 4 * (lane % 4);
+                        const int a_c  = 2 * (lane % 4);  // f16: 2 half per .b32
                         int a0 = pack_h2(s_P[a_r0 * NK + k0m + a_c],     s_P[a_r0 * NK + k0m + a_c + 1]);
                         int a1 = pack_h2(s_P[a_r1 * NK + k0m + a_c],     s_P[a_r1 * NK + k0m + a_c + 1]);
                         int a2 = pack_h2(s_P[a_r0 * NK + k0m + a_c + 8], s_P[a_r0 * NK + k0m + a_c + 9]);
