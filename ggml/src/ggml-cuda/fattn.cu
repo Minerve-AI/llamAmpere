@@ -1110,7 +1110,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 V->data,
                 (half2 *)dst->data,
                 seq_q, seq_k, n_heads, n_kv_heads, 128,
-                sm_scale, ws, ctx.stream[ctx.device]);
+                sm_scale, ws, ctx.streams[ctx.device][0]);
             return;
         }
     }
