@@ -475,12 +475,115 @@ void ggml_cuda_op_group_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     group_norm_f32_cuda(src0_d, dst_d, num_groups * src0->ne[3], eps, group_size, ggml_nelements(src0), stream);
 }
 
+
+// F16 version: read F16, compute in F32, write F16
+template <int block_size, bool do_multiply = false>
+static __global__ void rms_norm_f16(const __half * x,
+                                     __half *       dst,
+                                     const int     ncols,
+                                     const int64_t stride_row,
+                                     const int64_t stride_channel,
+                                     const int64_t stride_sample,
+                                     const float   eps,
+                                     const __half * mul                  = nullptr,
+                                     const int64_t mul_stride_row       = 0,
+                                     const int64_t mul_stride_channel   = 0,
+                                     const int64_t mul_stride_sample    = 0,
+                                     const uint3   mul_ncols_packed     = make_uint3(0, 0, 0),
+                                     const uint3   mul_nrows_packed     = make_uint3(0, 0, 0),
+                                     const uint3   mul_nchannels_packed = make_uint3(0, 0, 0),
+                                     const uint3   mul_nsamples_packed  = make_uint3(0, 0, 0)) {
+    ggml_cuda_pdl_lc();
+    const int nrows     = gridDim.x;
+    const int nchannels = gridDim.y;
+
+    const int row       = blockIdx.x;
+    const int channel   = blockIdx.y;
+    const int sample    = blockIdx.z;
+    const int tid       = threadIdx.x;
+
+    x   += sample*stride_sample + channel*stride_channel + row*stride_row;
+    dst += ((sample*nchannels + channel)*nrows + row)*ncols;
+
+    if constexpr (do_multiply) {
+        const uint32_t mul_row     = fastmodulo(row, mul_nrows_packed);
+        const uint32_t mul_channel = fastmodulo(channel, mul_nchannels_packed);
+        const uint32_t mul_sample  = fastmodulo(sample, mul_nsamples_packed);
+        mul += mul_sample * mul_stride_sample + mul_channel * mul_stride_channel + mul_row * mul_stride_row;
+    }
+
+    float tmp = 0.0f;
+
+    ggml_cuda_pdl_sync();
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = __half2float(x[col]);
+        tmp += xi * xi;
+    }
+
+    extern __shared__ float s_sum[];
+    tmp = block_reduce<block_reduce_method::SUM, block_size>(tmp, s_sum);
+
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = __half2float(x[col]);
+        if constexpr (do_multiply) {
+            const int mul_col = fastmodulo(col, mul_ncols_packed);
+            dst[col] = __float2half(scale * xi * __half2float(mul[mul_col]));
+        } else {
+            dst[col] = __float2half(scale * xi);
+        }
+    }
+}
+
+template <int block_size, bool do_multiply = false>
+static void launch_rms_norm_f16(const __half * x, __half * dst,
+                                int ncols, int nrows, int nchannels, int nsamples,
+                                int64_t s01, int64_t s02, int64_t s03, float eps,
+                                const __half * mul = nullptr,
+                                int64_t mul_s01 = 0, int64_t mul_s02 = 0, int64_t mul_s03 = 0,
+                                uint3 mul_ne0 = make_uint3(0,0,0), uint3 mul_ne1 = make_uint3(0,0,0),
+                                uint3 mul_ne2 = make_uint3(0,0,0), uint3 mul_ne3 = make_uint3(0,0,0),
+                                cudaStream_t stream = 0) {
+    dim3 block_dims(block_size);
+    dim3 grid_dims(nrows, nchannels, nsamples);
+    size_t shared_mem_size = block_size * sizeof(float);
+
+    if (mul) {
+        rms_norm_f16<block_size, true><<<grid_dims, block_dims, shared_mem_size, stream>>>(
+            x, dst, ncols, s01, s02, s03, eps, mul, mul_s01, mul_s02, mul_s03,
+            mul_ne0, mul_ne1, mul_ne2, mul_ne3);
+    } else {
+        rms_norm_f16<block_size, false><<<grid_dims, block_dims, shared_mem_size, stream>>>(
+            x, dst, ncols, s01, s02, s03, eps);
+    }
+}
+
 void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const float * src0_d = (const float *) src0->data;
     float * dst_d = (float *) dst->data;
     cudaStream_t stream = ctx.stream();
 
+    if (src0->type == GGML_TYPE_F16) {
+        const __half * src0_d_f16 = (const __half *) src0->data;
+        __half * dst_d_f16 = (__half *) dst->data;
+        float eps;
+        memcpy(&eps, dst->op_params, sizeof(float));
+        GGML_TENSOR_UNARY_OP_LOCALS;
+        const int64_t s01 = nb01 / 2; // half size
+        const int64_t s02 = nb02 / 2;
+        const int64_t s03 = nb03 / 2;
+        if (ne00 <= 1024) {
+            launch_rms_norm_f16<128, false>(src0_d_f16, dst_d_f16, ne00, ne01, ne02, ne03, s01, s02, s03, eps, nullptr, 0, 0, 0, make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), stream);
+        } else if (ne00 <= 2048) {
+            launch_rms_norm_f16<256, false>(src0_d_f16, dst_d_f16, ne00, ne01, ne02, ne03, s01, s02, s03, eps, nullptr, 0, 0, 0, make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), stream);
+        } else {
+            launch_rms_norm_f16<512, false>(src0_d_f16, dst_d_f16, ne00, ne01, ne02, ne03, s01, s02, s03, eps, nullptr, 0, 0, 0, make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), make_uint3(0,0,0), stream);
+        }
+        return;
+    }
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT( dst->type == GGML_TYPE_F32);
 
