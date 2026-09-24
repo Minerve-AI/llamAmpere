@@ -1072,6 +1072,32 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         }
     }
 
+
+    // [DEBUG] One-shot: log tensor properties for INT8-QK dispatch diagnosis
+    {
+        static bool i8qk_debug_printed = false;
+        if (!i8qk_debug_printed) {
+            i8qk_debug_printed = true;
+            const ggml_tensor * dQ = dst->src[0];
+            const ggml_tensor * dK = dst->src[1];
+            const ggml_tensor * dV = dst->src[2];
+            const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+            printf("[INT8-QK DEBUG] Q: type=%d ne=[%lld,%lld,%lld,%lld]  K: type=%d ne=[%lld,%lld,%lld,%lld]  V: type=%d ne=[%lld,%lld,%lld,%lld]\n",
+                (int)dQ->type, (long long)dQ->ne[0], (long long)dQ->ne[1], (long long)dQ->ne[2], (long long)dQ->ne[3],
+                (int)dK->type, (long long)dK->ne[0], (long long)dK->ne[1], (long long)dK->ne[2], (long long)dK->ne[3],
+                (int)dV->type, (long long)dV->ne[0], (long long)dV->ne[1], (long long)dV->ne[2], (long long)dV->ne[3]);
+            printf("[INT8-QK DEBUG] cc=%d  conditions: K=Q8_0:%d V=Q8_0:%d Q=F16:%d Q.ne0=128:%d V.ne0=128:%d Q.ne1>4:%d cc>=86:%d\n",
+                cc,
+                (int)(dK->type == GGML_TYPE_Q8_0),
+                (int)(dV->type == GGML_TYPE_Q8_0),
+                (int)(dQ->type == GGML_TYPE_F16),
+                (int)(dQ->ne[0] == 128),
+                (int)(dV->ne[0] == 128),
+                (int)(dQ->ne[1] > 4),
+                (int)(cc >= 86));
+        }
+    }
+
     // INT8-QK FlashAttention (SageAttention-style): QK^T on INT8 tensor cores.
     // Conditions: Q8_0 K+V, head_dim=128, sm_86+, prefill (n_q > 4), F16 Q.
     // K is mean-smoothed + per-64-key-tile INT8 quantized; Q is per-row INT8 in-kernel.
