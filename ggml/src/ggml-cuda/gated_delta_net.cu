@@ -103,8 +103,8 @@ gated_delta_net_cuda(const T_in * q,
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
             const int i = r * warp_size + lane;
-            k_reg[r] = gdn_to_float(k_t[i];
-            q_reg[r] = gdn_to_float(q_t[i];
+            k_reg[r] = gdn_to_float(k_t[i]);
+            q_reg[r] = gdn_to_float(q_t[i]);
         }
 
         if constexpr (!KDA) {
