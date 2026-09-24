@@ -609,11 +609,77 @@ static void ggml_cuda_op_gated_delta_net_impl(
         const __half * v_d_f16 = (const __half *) src_v->data;
         const __half * g_d_f16 = (const __half *) src_g->data;
         const __half * b_d_f16 = (const __half *) src_beta->data;
-        const float *  s_d_f16 = (const float *)  state->data;
+        const float  * s_d_f16 = (const float *)  src_state->data;
         __half *       dst_d_f16 = (__half *) dst->data;
-        // Launch with __half template param
-        // TODO: full F16 dispatch (state layout differs)
-        // For now, fall through to F32 path (graph compiler inserts casts)
+
+        // strides in F16 element units
+        const int64_t sq1_f16 = nbq1 / sizeof(__half);
+        const int64_t sq2_f16 = nbq2 / sizeof(__half);
+        const int64_t sq3_f16 = nbq3 / sizeof(__half);
+        const int64_t sv1_f16 = nbv1 / sizeof(__half);
+        const int64_t sv2_f16 = nbv2 / sizeof(__half);
+        const int64_t sv3_f16 = nbv3 / sizeof(__half);
+        const int64_t sb1_f16 = nbb1 / sizeof(__half);
+        const int64_t sb2_f16 = nbb2 / sizeof(__half);
+        const int64_t sb3_f16 = nbb3 / sizeof(__half);
+
+        const float scale_f16 = 1.0f / sqrtf((float) S_v);
+        cudaStream_t stream_f16 = ctx.stream();
+
+        const int  K_f16         = ggml_get_op_params_i32(dst, 0);
+        const int  emit_mode_f16 = ggml_get_op_params_i32(dst, 1);
+        const bool keep_rs_f16   = (K_f16 > 1) || (emit_mode_f16 != 0);
+        const bool emit_ingr_f16 = (emit_mode_f16 == 1);
+
+        // state offset: dst buffer is F16, state is F32 after the attention scores
+        float * state_d_f16 = (float *) (dst_d_f16 + S_v * H * n_tokens * n_seqs);
+        int64_t state_slot_stride_f16 = emit_ingr_f16 ? (4 * S_v * H * n_seqs) : (S_v * S_v * H * n_seqs);
+        if (cache != nullptr) {
+            state_d_f16           = cache->data;
+            state_slot_stride_f16 = cache->slot_stride;
+        }
+
+        // launch F16 kernel
+        if (kda) {
+            if (emit_ingr_f16) {
+                launch_gated_delta_net<__half, true, true, true>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            } else if (keep_rs_f16) {
+                launch_gated_delta_net<__half, true, true, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            } else {
+                launch_gated_delta_net<__half, true, false, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            }
+        } else {
+            if (emit_ingr_f16) {
+                launch_gated_delta_net<__half, false, true, true>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            } else if (keep_rs_f16) {
+                if (launch_gated_delta_net_ilp<__half, true>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                        S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                        sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16)) {
+                    return;
+                }
+                launch_gated_delta_net<__half, false, true, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            } else {
+                if (launch_gated_delta_net_ilp<__half, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                        S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                        sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16)) {
+                    return;
+                }
+                launch_gated_delta_net<__half, false, false, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                    S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
+                    sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
+            }
+        }
+        return;
     }
 
     const float * q_d = (const float *) src_q->data;
