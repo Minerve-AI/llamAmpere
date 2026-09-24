@@ -3,19 +3,29 @@
 
 #include <cstdlib>
 
+
+// Type conversion helpers for F16 I/O
+template <typename T>
+inline __device__ float gdn_to_float(T x) { return x; }
+inline __device__ float gdn_to_float(__half x) { return __half2float(x); }
+
+template <typename T>
+inline __device__ T gdn_from_float(float x) { return x; }
+inline __device__ __half gdn_from_float(float x) { return __float2half(x); }
+
 // emit_ingredients_t (only meaningful when keep_rs_t): write per-token (k,v,g,beta) ingredients
 // instead of a full [S_v,S_v] state snapshot per retained slot, plus one fixed-cost trailing
 // final-state block -- see ggml_gated_delta_net's emit_mode==1 contract (ggml.h) and the CPU
 // reference (ggml-cpu/ops.cpp). Never instantiated with keep_rs_t == false.
-template <int S_v, bool KDA, bool keep_rs_t, bool emit_ingredients_t>
+template <typename T_in = float, int S_v = 128, bool KDA = false, bool keep_rs_t = false, bool emit_ingredients_t = false>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
-gated_delta_net_cuda(const float * q,
-                                     const float * k,
-                                     const float * v,
-                                     const float * g,
-                                     const float * beta,
+gated_delta_net_cuda(const T_in * q,
+                                     const T_in * k,
+                                     const T_in * v,
+                                     const T_in * g,
+                                     const T_in * beta,
                                      const float * curr_state,
-                                     float *       dst,
+                                     T_in *       dst,
                                      float *       state,
                                      int64_t       H,
                                      int64_t       n_tokens,
@@ -43,7 +53,7 @@ gated_delta_net_cuda(const float * q,
     const uint32_t iq1 = fastmodulo(h_idx, neqk1_magic);
     const uint32_t iq3 = fastdiv(sequence, rq3_magic);
 
-    float *       attn_data        = dst;
+    T_in *       attn_data        = dst;
 
     // input state holds s0 only: [S_v, S_v, H, n_seqs] — seq stride is D = H * S_v * S_v.
     // output layout (per-slot stride passed in as state_slot_stride) — same per-(seq,head)
@@ -241,13 +251,13 @@ gated_delta_net_cuda(const float * q,
 // NC reduction chains interleave; multi-token, scalar-gate, S_v == 128 only (GGML_CUDA_SM86_GDN_COLS)
 template <int S_v, bool keep_rs_t, int NC, bool PREFETCH>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
-gated_delta_net_cuda_ilp(const float * q,
-                         const float * k,
-                         const float * v,
-                         const float * g,
-                         const float * beta,
+gated_delta_net_cuda_ilp(const T_in * q,
+                         const T_in * k,
+                         const T_in * v,
+                         const T_in * g,
+                         const T_in * beta,
                          const float * curr_state,
-                         float *       dst,
+                         T_in *       dst,
                          float *       state,
                          int64_t       H,
                          int64_t       n_tokens,
