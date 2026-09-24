@@ -1086,13 +1086,13 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 (int)dQ->type, (long long)dQ->ne[0], (long long)dQ->ne[1], (long long)dQ->ne[2], (long long)dQ->ne[3],
                 (int)dK->type, (long long)dK->ne[0], (long long)dK->ne[1], (long long)dK->ne[2], (long long)dK->ne[3],
                 (int)dV->type, (long long)dV->ne[0], (long long)dV->ne[1], (long long)dV->ne[2], (long long)dV->ne[3]);
-            printf("[INT8-QK DEBUG] cc=%d  conditions: K=Q8_0:%d V=Q8_0:%d Q=F16:%d Q.ne0=128:%d V.ne0=128:%d Q.ne1>4:%d cc>=86:%d\n",
+            printf("[INT8-QK DEBUG] cc=%d  conditions: K=Q8_0:%d V=Q8_0:%d Q=F16:%d Q.ne0=256:%d V.ne0=256:%d Q.ne1>4:%d cc>=86:%d\n",
                 cc,
                 (int)(dK->type == GGML_TYPE_Q8_0),
                 (int)(dV->type == GGML_TYPE_Q8_0),
                 (int)(dQ->type == GGML_TYPE_F16),
-                (int)(dQ->ne[0] == 128),
-                (int)(dV->ne[0] == 128),
+                (int)(dQ->ne[0] == 256),
+                (int)(dV->ne[0] == 256),
                 (int)(dQ->ne[1] > 4),
                 (int)(cc >= 86));
         }
@@ -1109,7 +1109,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
         if (K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0 &&
             Q->type == GGML_TYPE_F16 &&
-            Q->ne[0] == 128 && V->ne[0] == 128 &&
+            Q->ne[0] == 256 && V->ne[0] == 256 &&
             Q->ne[1] > 4 && cc >= 86) {
             const int seq_q = (int)Q->ne[1];
             const int seq_k = (int)K->ne[1];
@@ -1123,19 +1123,19 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             static int ws_hd = 0;
             if (seq_k > ws_max_seq_k || n_kv_heads != ws_n_kv || 128 != ws_hd) {
                 if (ws.allocated) ggml_cuda_fattn_i8qk::i8qk_free(ws);
-                ws = ggml_cuda_fattn_i8qk::i8qk_alloc(seq_k, n_kv_heads, 128);
+                ws = ggml_cuda_fattn_i8qk::i8qk_alloc(seq_k, n_kv_heads, 256);
                 ws_max_seq_k = seq_k;
                 ws_n_kv = n_kv_heads;
-                ws_hd = 128;
+                ws_hd = 256;
             }
 
-            const float sm_scale = 1.0f / sqrtf(128.0f);
+            const float sm_scale = 1.0f / sqrtf(256.0f);
             ggml_cuda_fattn_i8qk::flash_attn_i8qk_q8(
                 (const half2 *)Q->data,
                 K->data,
                 V->data,
                 (half2 *)dst->data,
-                seq_q, seq_k, n_heads, n_kv_heads, 128,
+                seq_q, seq_k, n_heads, n_kv_heads, 256,
                 sm_scale, ws, ctx.streams[ctx.device][0]);
             return;
         }
