@@ -87,12 +87,12 @@ gated_delta_net_cuda(const T_in * q,
     }
 
     for (int t = 0; t < n_tokens; t++) {
-        const float * q_t = q + iq3 * sq3 + t * sq2 + iq1 * sq1;
-        const float * k_t = k + iq3 * sq3 + t * sq2 + iq1 * sq1;
-        const float * v_t = v + sequence * sv3 + t * sv2 + h_idx * sv1;
+        const T_in * q_t = q + iq3 * sq3 + t * sq2 + iq1 * sq1;
+        const T_in * k_t = k + iq3 * sq3 + t * sq2 + iq1 * sq1;
+        const T_in * v_t = v + sequence * sv3 + t * sv2 + h_idx * sv1;
 
         const int64_t gb_offset = sequence * sb3 + t * sb2 + h_idx * sb1;
-        const float * beta_t = beta + gb_offset;
+        const T_in * beta_t = beta + gb_offset;
         const float * g_t    = g    + gb_offset * (KDA ? S_v : 1);
 
         const float beta_val = *beta_t;
@@ -189,7 +189,7 @@ gated_delta_net_cuda(const T_in * q,
                             const int i    = r * warp_size + lane;
                             ingr_slot[i]   = k_reg[r];
                             if constexpr (KDA) {
-                                ingr_slot[2 * S_v + i] = g_t[i];
+                                ingr_slot[2 * S_v + i] = gdn_to_float(g_t[i]);
                             } else {
                                 ingr_slot[2 * S_v + i] = *g_t;
                             }
@@ -197,7 +197,7 @@ gated_delta_net_cuda(const T_in * q,
                         }
                     }
                     if (lane == 0) {
-                        ingr_slot[S_v + col] = v_t[col];
+                        ingr_slot[S_v + col] = gdn_to_float(v_t[col]);
                     }
                 } else {
                     float * curr_state = state_out + (int64_t) target_slot * state_slot_stride;
@@ -320,9 +320,9 @@ gated_delta_net_cuda_ilp(const T_in * q,
     float beta_val;
 
     auto load_tok = [&](int t, float * kr, float * qr, float * vr, float & gr, float & br) {
-        const float * q_t = q_base + t * sq2;
-        const float * k_t = k_base + t * sq2;
-        const float * v_t = v_base + t * sv2;
+        const T_in * q_t = q_base + t * sq2;
+        const T_in * k_t = k_base + t * sq2;
+        const T_in * v_t = v_base + t * sv2;
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
             kr[r] = k_t[r * warp_size + lane];
@@ -330,7 +330,7 @@ gated_delta_net_cuda_ilp(const T_in * q,
         }
 #pragma unroll
         for (int c = 0; c < NC; c++) {
-            vr[c] = v_t[c];
+            vr[c] = gdn_to_float(v_t[c]);
         }
         gr = g_base[t * sb2];
         br = b_base[t * sb2];
