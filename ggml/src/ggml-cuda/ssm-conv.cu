@@ -328,6 +328,12 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
     // When fusing, write to silu_dst (the node downstream references).
     const struct ggml_tensor * out = fuse_silu ? silu_dst : dst;
 
+    const int64_t nc  = src1->ne[0];                // d_conv
+    const int64_t nr  = src0->ne[1];                // d_inner
+    const int64_t n_t = out->ne[1];                 // tokens per sequence
+    const int64_t n_s = out->ne[2];                 // number of sequences in the batch
+    cudaStream_t  stream = ctx.stream();
+
     // F16 path
     if (src0->type == GGML_TYPE_F16) {
         const __half * src0_d_f16 = (const __half *) src0->data;
@@ -344,12 +350,6 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
         return;
     }
 
-
-    const int64_t nc  = src1->ne[0];                // d_conv
-    const int64_t nr  = src0->ne[1];                // d_inner
-    const int64_t n_t = out->ne[1];                 // tokens per sequence
-    const int64_t n_s = out->ne[2];                 // number of sequences in the batch
-
     GGML_ASSERT(out->ne[0] == nr);
     GGML_ASSERT(src0->nb[0] == sizeof(float));
     GGML_ASSERT(src1->nb[0] == sizeof(float));
@@ -359,7 +359,6 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
     const float * src1_d = (const float *) src1->data;
     const float * bias_d = fuse_bias ? (const float *) bias->data : nullptr;
     float *       dst_d  = (float *) out->data;
-    cudaStream_t  stream = ctx.stream();
 
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(out->type == GGML_TYPE_F32);
