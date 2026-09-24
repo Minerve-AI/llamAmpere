@@ -1791,8 +1791,8 @@ ggml_tensor * llm_graph_context::build_norm(
         // This re-inserts a cast node into the graph on every build (every token), but norm
         // weight tensors are n_embd-sized (a few KB), so the added cost is not worth caching
         // across builds versus upcasting these specific tensors once at load time.
-        if (mw->type != cur->type && cur->type == GGML_TYPE_F32) {
-            mw = ggml_cast(ctx0, mw, GGML_TYPE_F32);
+        if (mw->type != cur->type) {
+            mw = ggml_cast(ctx0, mw, cur->type);
         }
         cur = ggml_mul(ctx0, cur, mw);
         if (mb) {
@@ -1802,8 +1802,8 @@ ggml_tensor * llm_graph_context::build_norm(
 
     if (mb) {
         // see mw cast note above
-        if (mb->type != cur->type && cur->type == GGML_TYPE_F32) {
-            mb = ggml_cast(ctx0, mb, GGML_TYPE_F32);
+        if (mb->type != cur->type) {
+            mb = ggml_cast(ctx0, mb, cur->type);
         }
         cur = ggml_add(ctx0, cur, mb);
     }
