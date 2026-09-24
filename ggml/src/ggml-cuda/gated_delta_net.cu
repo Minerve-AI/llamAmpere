@@ -103,8 +103,8 @@ gated_delta_net_cuda(const T_in * q,
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
             const int i = r * warp_size + lane;
-            k_reg[r] = k_t[i];
-            q_reg[r] = q_t[i];
+            k_reg[r] = gdn_to)_float(k_t[i];
+            q_reg[r] = gdn_to)_float(q_t[i];
         }
 
         if constexpr (!KDA) {
@@ -133,7 +133,7 @@ gated_delta_net_cuda(const T_in * q,
             float attn_col = warp_reduce_sum<warp_size>(attn_partial);
 
             if (lane == 0) {
-                attn_data[col] = attn_col * scale;
+                attn_data[col] = gdn_from_float<T_in>(attn_col * scale);
             }
         } else {
             // kv[col] = sum_i g[i] * S[i][col] * k[i]
@@ -162,7 +162,7 @@ gated_delta_net_cuda(const T_in * q,
             float attn_col = warp_reduce_sum<warp_size>(attn_partial);
 
             if (lane == 0) {
-                attn_data[col] = attn_col * scale;
+                attn_data[col] = gdn_from_float<T_in>(attn_col * scale);
             }
         }
 
@@ -392,7 +392,7 @@ gated_delta_net_cuda_ilp(const T_in * q,
         if (lane == 0) {
 #pragma unroll
             for (int c = 0; c < NC; c++) {
-                attn_data[col0 + c] = attn_col[c] * scale;
+                attn_data[col0 + c] = gdn_from_float<T_in>(attn_col[c] * scale);
             }
         }
 
