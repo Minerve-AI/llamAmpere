@@ -1121,7 +1121,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             static int ws_max_seq_k = 0;
             static int ws_n_kv = 0;
             static int ws_hd = 0;
-            if (seq_k > ws_max_seq_k || n_kv_heads != ws_n_kv || 128 != ws_hd) {
+            if (seq_k > ws_max_seq_k || n_kv_heads != ws_n_kv || 256 != ws_hd) {
                 if (ws.allocated) ggml_cuda_fattn_i8qk::i8qk_free(ws);
                 ws = ggml_cuda_fattn_i8qk::i8qk_alloc(seq_k, n_kv_heads, 256);
                 ws_max_seq_k = seq_k;
