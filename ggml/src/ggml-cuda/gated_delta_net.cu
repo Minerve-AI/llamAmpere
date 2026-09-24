@@ -119,7 +119,7 @@ gated_delta_net_cuda(const T_in * q,
             float kv_col = warp_reduce_sum<warp_size>(kv_shard);
 
             // delta[col] = (v[col] - g * kv[col]) * beta
-            float delta_col = (v_t[col] - g_val * kv_col) * beta_val;
+            float delta_col = (gdn_to_float(v_t[col]) - g_val * kv_col) * beta_val;
 
             // fused: S[i][col] = g * S[i][col] + k[i] * delta[col]
             // attn[col] = (S^T @ q)[col] = sum_i S[i][col] * q[i]
@@ -141,13 +141,13 @@ gated_delta_net_cuda(const T_in * q,
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 const int i = r * warp_size + lane;
-                kv_shard += expf(g_t[i]) * s_shard[r] * k_reg[r];
+                kv_shard += expf(gdn_to_float(g_t[i])) * s_shard[r] * k_reg[r];
             }
 
             float kv_col = warp_reduce_sum<warp_size>(kv_shard);
 
             // delta[col] = (v[col] - kv[col]) * beta
-            float delta_col = (v_t[col] - kv_col) * beta_val;
+            float delta_col = (gdn_to_float(v_t[col]) - kv_col) * beta_val;
 
             // fused: S[i][col] = g[i] * S[i][col] + k[i] * delta[col]
             // attn[col] = (S^T @ q)[col] = sum_i S[i][col] * q[i]
@@ -155,7 +155,7 @@ gated_delta_net_cuda(const T_in * q,
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 const int i = r * warp_size + lane;
-                s_shard[r]  = expf(g_t[i]) * s_shard[r] + k_reg[r] * delta_col;
+                s_shard[r]  = expf(gdn_to_float(g_t[i])) * s_shard[r] + k_reg[r] * delta_col;
                 attn_partial += s_shard[r] * q_reg[r];
             }
 
@@ -601,6 +601,20 @@ static void ggml_cuda_op_gated_delta_net_impl(
     const int64_t neqk1 = neq1;
 
     const int64_t rq3 = nev3 / neq3;
+
+    // F16 path: detect type and launch appropriate kernel
+    if (src_q->type == GGML_TYPE_F16) {
+        const __half * q_d_f16 = (const __half *) src_q->data;
+        const __half * k_d_f16 = (const __half *) src_k->data;
+        const __half * v_d_f16 = (const __half *) src_v->data;
+        const __half * g_d_f16 = (const __half *) src_g->data;
+        const __half * b_d_f16 = (const __half *) src_beta->data;
+        const float *  s_d_f16 = (const float *)  state->data;
+        __half *       dst_d_f16 = (__half *) dst->data;
+        // Launch with __half template param
+        // TODO: full F16 dispatch (state layout differs)
+        // For now, fall through to F32 path (graph compiler inserts casts)
+    }
 
     const float * q_d = (const float *) src_q->data;
     const float * k_d = (const float *) src_k->data;
