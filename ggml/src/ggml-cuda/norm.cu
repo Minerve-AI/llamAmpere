@@ -537,6 +537,67 @@ static __global__ void rms_norm_f16(const __half * x,
     }
 }
 
+// Fused kernel: out = rms_norm(x + y) * w
+// Combines ADD + RMS_NORM + MUL into a single pass, saving 2 memory passes.
+// Pattern matches Qwen3Next residual: ADD(gdn_out, inpL) -> RMS_NORM -> MUL(weight)
+template <int block_size>
+static __global__ void rms_norm_add_mul_f16(const __half * __restrict__ x,
+                                             const __half * __restrict__ y,
+                                             const __half * __restrict__ w,
+                                             __half *           __restrict__ dst,
+                                             const int     ncols,
+                                             const int64_t stride_row_x,
+                                             const int64_t stride_ch_x,
+                                             const int64_t stride_s_x,
+                                             const int64_t stride_row_y,
+                                             const int64_t stride_ch_y,
+                                             const int64_t stride_s_y,
+                                             const float   eps) {
+    ggml_cuda_pdl_lc();
+    const int row     = blockIdx.x;
+    const int channel = blockIdx.y;
+    const int sample  = blockIdx.z;
+    const int tid     = threadIdx.x;
+
+    x   += sample*stride_s_x + channel*stride_ch_x + row*stride_row_x;
+    y   += sample*stride_s_y + channel*stride_ch_y + row*stride_row_y;
+    dst += ((sample*gridDim.y + channel)*gridDim.x + row)*ncols;
+
+    // w is a 1D norm weight [ncols, 1, 1, 1] - same for all rows/channels/samples
+
+    float tmp = 0.0f;
+
+    ggml_cuda_pdl_sync();
+    for (int col = tid; col < ncols; col += block_size) {
+        const float v = __half2float(x[col]) + __half2float(y[col]);
+        tmp += v * v;
+    }
+
+    extern __shared__ float s_sum[];
+    tmp = block_reduce<block_reduce_method::SUM, block_size>(tmp, s_sum);
+
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+
+    for (int col = tid; col < ncols; col += block_size) {
+        const float v = __half2float(x[col]) + __half2float(y[col]);
+        dst[col] = __float2half(scale * v * __half2float(w[col]));
+    }
+}
+
+template <int block_size>
+static void launch_rms_norm_add_mul_f16(const __half * x, const __half * y, const __half * w, __half * dst,
+                                         int ncols, int nrows, int nchannels, int nsamples,
+                                         int64_t sx01, int64_t sx02, int64_t sx03,
+                                         int64_t sy01, int64_t sy02, int64_t sy03,
+                                         float eps, cudaStream_t stream) {
+    dim3 block_dims(block_size);
+    dim3 grid_dims(nrows, nchannels, nsamples);
+    size_t shared_mem_size = block_size * sizeof(float);
+    rms_norm_add_mul_f16<block_size><<<grid_dims, block_dims, shared_mem_size, stream>>>(
+        x, y, w, dst, ncols, sx01, sx02, sx03, sy01, sy02, sy03, eps);
+}
+
 template <int block_size, bool do_multiply = false>
 static void launch_rms_norm_f16(const __half * x, __half * dst,
                                 int ncols, int nrows, int nchannels, int nsamples,
@@ -748,6 +809,76 @@ void ggml_cuda_op_rms_norm_fused_add(ggml_backend_cuda_context & ctx,
                           /*add_s00*/ add_s01, add_s02, add_s03,
                           add_ncols, add_nrows, add_nchannels, add_nsamples,
                           eps, stream);
+}
+
+// Fused: ADD -> RMS_NORM -> MUL  (residual pattern: out = rms_norm(x + y) * w)
+// Matches Qwen3Next per-layer: ADD(gdn_out, inpL) -> RMS_NORM -> MUL(norm_weight)
+void ggml_cuda_op_add_rms_norm_fused(ggml_backend_cuda_context & ctx,
+                                     ggml_tensor *               add_tensor,
+                                     ggml_tensor *               norm_tensor,
+                                     ggml_tensor *               mul_tensor) {
+    // add_tensor: GGML_OP_ADD with src[0]=x, src[1]=y
+    // norm_tensor: GGML_OP_RMS_NORM with src[0]=add_tensor
+    // mul_tensor:  GGML_OP_MUL with src[0]=norm_tensor, src[1]=w (or vice versa)
+
+    const ggml_tensor * x = add_tensor->src[0];
+    const ggml_tensor * y = add_tensor->src[1];
+
+    float eps = 0.0f;
+    memcpy(&eps, norm_tensor->op_params, sizeof(float));
+
+    // Find the weight tensor in mul_tensor (the one that is NOT norm_tensor)
+    const ggml_tensor * w = nullptr;
+    if (mul_tensor->src[0] == norm_tensor) {
+        w = mul_tensor->src[1];
+    } else if (mul_tensor->src[1] == norm_tensor) {
+        w = mul_tensor->src[0];
+    } else {
+        GGML_ASSERT(false);
+    }
+
+    const __half * x_d = (const __half *) x->data;
+    const __half * y_d = (const __half *) y->data;
+    const __half * w_d = (const __half *) w->data;
+    __half       * dst_d = (__half *) mul_tensor->data;
+
+    cudaStream_t stream = ctx.stream();
+
+    GGML_ASSERT(x->type == GGML_TYPE_F16);
+    GGML_ASSERT(y->type == GGML_TYPE_F16);
+    GGML_ASSERT(w->type == GGML_TYPE_F16);
+    GGML_ASSERT(mul_tensor->type == GGML_TYPE_F16);
+    GGML_ASSERT(eps >= 0.0f);
+
+    const int64_t ncols     = x->ne[0];
+    const int64_t nrows     = x->ne[1];
+    const int64_t nchannels = x->ne[2];
+    const int64_t nsamples  = x->ne[3];
+
+    const size_t ts = ggml_type_size(x->type);
+    GGML_ASSERT(x->nb[0] == ts);
+    const int64_t sx01 = x->nb[1] / ts;
+    const int64_t sx02 = x->nb[2] / ts;
+    const int64_t sx03 = x->nb[3] / ts;
+
+    GGML_ASSERT(y->nb[0] == ts);
+    const int64_t sy01 = y->nb[1] / ts;
+    const int64_t sy02 = y->nb[2] / ts;
+    const int64_t sy03 = y->nb[3] / ts;
+
+    // w is a 1D norm weight [ncols, 1, 1, 1] - no strides needed, just index by col
+    GGML_ASSERT(w->ne[0] == ncols);
+
+    // Choose block size based on ncols
+    if (ncols <= 1024) {
+        launch_rms_norm_add_mul_f16<256>(x_d, y_d, w_d, dst_d,
+            (int)ncols, (int)nrows, (int)nchannels, (int)nsamples,
+            sx01, sx02, sx03, sy01, sy02, sy03, eps, stream);
+    } else {
+        launch_rms_norm_add_mul_f16<1024>(x_d, y_d, w_d, dst_d,
+            (int)ncols, (int)nrows, (int)nchannels, (int)nsamples,
+            sx01, sx02, sx03, sy01, sy02, sy03, eps, stream);
+    }
 }
 
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
