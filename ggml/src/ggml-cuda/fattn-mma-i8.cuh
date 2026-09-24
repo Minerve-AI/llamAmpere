@@ -2,6 +2,8 @@
 // INT8-QK FlashAttention kernel for Ampere (sm_86)
 // HyperQwen/SageAttention-style: INT8 QK^T + FP16 PV on tensor cores
 //
+// Target: Qwen3.8-27B Gated Attention (24 Q-heads, 4 KV-heads, head_size=256)
+//
 // Strategy:
 //   - Q: quantized per-row to INT8 in-kernel (absmax scale)
 //   - K: pre-quantized to INT8 (mean-subtracted, per 64-key tile scale)
@@ -12,6 +14,8 @@
 //
 // Block: 256 threads (8 warps), NQ=16 queries, NK=64 keys
 // Grid: (n_heads, ceil(seq_q / NQ))
+//
+// Shared memory: ~74KB (requires 1 block/SM, sm_86 opt-in)
 
 #include "common.cuh"
 #include "mma.cuh"
@@ -19,12 +23,30 @@
 
 namespace ggml_cuda_fattn_i8qk {
 
-    constexpr int DKQ = 128;
-    constexpr int DV  = 128;
+    constexpr int DKQ = 256;   // head_dim for QK (Qwen3.8-27B Gated Attention)
+    constexpr int DV  = 256;   // head_dim for V
     constexpr int NTHREADS = 256;
     constexpr int NQ = 16;   // queries per block
     constexpr int NK = 64;   // keys per block
     constexpr int NWARPS = NTHREADS / 32; // 8
+
+    // Shared memory layout (dynamic, opt-in)
+    // s_Q:   NQ*DKQ int8        = 16*256     = 4096 B
+    // s_K:   DKQ*NK int8        = 256*64     = 16384 B
+    // s_V:   NK*DV half         = 64*256*2   = 32768 B
+    // s_S:   NQ*NK float        = 16*64*4    = 4096 B
+    // s_P:   NQ*NK half         = 16*64*2    = 2048 B
+    // scales: (NQ*5+1)*float    = 81*4       = 324 B
+    // s_O:   NQ*DV float        = 16*256*4   = 16384 B
+    // Total:                          = 76000 B (~74.2 KB)
+    constexpr int SMEM_Q   = NQ * DKQ;
+    constexpr int SMEM_K   = DKQ * NK;
+    constexpr int SMEM_V   = NK * DV * 2;
+    constexpr int SMEM_S   = NQ * NK * 4;
+    constexpr int SMEM_P   = NQ * NK * 2;
+    constexpr int SMEM_SC  = (NQ * 5 + 1) * 4;
+    constexpr int SMEM_O   = NQ * DV * 4;
+    constexpr int SMEM_TOT = SMEM_Q + SMEM_K + SMEM_V + SMEM_S + SMEM_P + SMEM_SC + SMEM_O;
 
     // Pack 4 int8 into one .b32
     static __device__ __forceinline__ int pack_i4(int8_t a, int8_t b, int8_t c, int8_t d) {
@@ -53,7 +75,7 @@ namespace ggml_cuda_fattn_i8qk {
     // V:   [n_kv_heads, seq_k, DV/32] block_q8_0
     // O:   [n_heads, seq_q, DV/2] half2
     //
-    __global__ void __launch_bounds__(NTHREADS, 2)
+    __global__ void __launch_bounds__(NTHREADS, 1)
     flash_attn_i8qk_kernel(
             const half2 * __restrict__ Q_h2,
             const int8_t * __restrict__ K_int8,
@@ -63,6 +85,20 @@ namespace ggml_cuda_fattn_i8qk {
             const int seq_q, const int seq_k,
             const int n_heads, const int n_kv_heads,
             const float sm_scale) {
+
+        // Dynamic shared memory partition
+        extern __shared__ char smem_raw[];
+        int8_t * s_Q   = (int8_t *)smem_raw;
+        int8_t * s_K   = s_Q + SMEM_Q;
+        half   * s_V   = (half *)(s_K + SMEM_K);
+        float  * s_S   = (float *)(s_V + NK * DV);
+        half   * s_P   = (half *)(s_S + NQ * NK);
+        float  * s_q_scale = (float *)(s_P + NQ * NK);
+        float  * s_k_scale = s_q_scale + NQ;
+        float  * s_m     = s_k_scale + 1;
+        float  * s_l     = s_m + NQ;
+        float  * s_alpha = s_l + NQ;
+        float  * s_O     = s_alpha + NQ;
 
         const int head    = blockIdx.x;
         const int q_block = blockIdx.y;
@@ -74,26 +110,11 @@ namespace ggml_cuda_fattn_i8qk {
         const int lane    = tid % 32;
 
         // =================================================================
-        // Shared memory
-        // =================================================================
-        __shared__ int8_t  s_Q[NQ * DKQ];            // [16][128] INT8
-        __shared__ int8_t  s_K[DKQ * NK];            // [128][64] INT8 (dim-major)
-        __shared__ half    s_V[NK * DV];             // [64][128] FP16 (key-major)
-        __shared__ float   s_S[NQ * NK];             // [16][64] logits/softmax
-        __shared__ half    s_P[NQ * NK];             // [16][64] P for PV MMA
-        __shared__ float   s_q_scale[NQ];
-        __shared__ float   s_k_scale;
-        __shared__ float   s_m[NQ];
-        __shared__ float   s_l[NQ];
-        __shared__ float   s_alpha[NQ];
-        __shared__ float   s_O[NQ * DV];             // [16][128] FP32 accumulator
-
-        // =================================================================
         // Phase 0: Load Q, quantize to INT8
         // =================================================================
         {
-            const int n_h2 = DKQ / 2;
-            // 16 rows × 64 half2 = 1024 half2, 256 threads → 4 per thread
+            const int n_h2 = DKQ / 2; // 128 half2 per row
+            // 16 rows × 128 half2 = 2048 half2, 256 threads → 8 per thread
             for (int i = tid; i < NQ * n_h2; i += NTHREADS) {
                 const int r = i / n_h2;
                 const int c = i % n_h2;
@@ -104,21 +125,19 @@ namespace ggml_cuda_fattn_i8qk {
                 } else {
                     v = make_float2(0.0f, 0.0f);
                 }
-                // Store to a temp area in s_O (reuse before init)
-                // Actually, let's store directly and compute amax
                 s_O[r * DV + c * 2]     = v.x;
                 s_O[r * DV + c * 2 + 1] = v.y;
             }
             __syncthreads();
 
-            // Compute per-row absmax: 16 rows, each 128 values
-            // 256 threads: 16 threads per row
+            // Compute per-row absmax: 16 rows × 256 values
+            // 256 threads: 16 threads per row, each handles 16 values
             {
                 const int r = tid / 16;
-                const int c = (tid % 16) * 8; // 8 values per thread
+                const int c = (tid % 16) * 16; // 16 values per thread
                 float local_max = 0.0f;
                 #pragma unroll
-                for (int i = 0; i < 8; ++i) {
+                for (int i = 0; i < 16; ++i) {
                     local_max = fmaxf(local_max, fabsf(s_O[r * DV + c + i]));
                 }
                 // Warp-level reduce within the 16-thread group
@@ -131,7 +150,7 @@ namespace ggml_cuda_fattn_i8qk {
             }
             __syncthreads();
 
-            // Quantize to INT8
+            // Quantize to INT8: 16×256 = 4096 int8, 256 threads → 16 per thread
             for (int i = tid; i < NQ * DKQ; i += NTHREADS) {
                 const int r = i / DKQ;
                 const int d = i % DKQ;
@@ -158,7 +177,7 @@ namespace ggml_cuda_fattn_i8qk {
 
             // ---------------------------------------------------------
             // Load K tile: s_K[d * NK + k] = K_int8[kv_head, k0+k, d]
-            // 128 × 64 = 8192 int8, 256 threads → 32 per thread
+            // 256 × 64 = 16384 int8, 256 threads → 64 per thread
             // ---------------------------------------------------------
             for (int i = tid; i < DKQ * NK; i += NTHREADS) {
                 const int d = i / NK;
@@ -169,11 +188,11 @@ namespace ggml_cuda_fattn_i8qk {
 
             // ---------------------------------------------------------
             // Load V tile: s_V[k * DV + d] = dequant(V_q8[kv_head, k0+k, d])
-            // 64 × 128 = 8192 half, 256 threads → 32 per thread
+            // 64 × 256 = 16384 half, 256 threads → 64 per thread
             // V_q8 layout: [kv_head, seq, DV/32] blocks of 32
             // ---------------------------------------------------------
             {
-                const int nblk = DV / 32; // 4 blocks per row
+                const int nblk = DV / 32; // 8 blocks per row
                 for (int i = tid; i < NK * DV; i += NTHREADS) {
                     const int k = i / DV;
                     const int d = i % DV;
@@ -189,18 +208,18 @@ namespace ggml_cuda_fattn_i8qk {
 
             // Load K scale (one per 64-key tile)
             if (tid == 0) {
-                s_k_scale = K_scale[(k0 / 64) * n_kv_heads + kv_head];
+                s_k_scale[0] = K_scale[(k0 / 64) * n_kv_heads + kv_head];
             }
             __syncthreads();
 
             // ---------------------------------------------------------
-            // QK^T via INT8 MMA: S[16][64] = Q[16][128] × K[128][64]
+            // QK^T via INT8 MMA: S[16][64] = Q[16][256] × K[256][64]
             //
             // mma.m16n8k16.row.col.s32.s8.s8.s32
             // A[16×16] = Q_int8[m][d0+k], B[16×8] = K_int8[n][d0+k]
             // C[16×8] = S[m][n]
             //
-            // 8 warps: warp w → n-chunk w (keys w*8..w*8+7), 8 k-chunks
+            // 8 warps: warp w → n-chunk w (keys w*8..w*8+7), 16 k-chunks
             // ---------------------------------------------------------
             {
                 const int n_off = warp_id * 8; // this warp's 8 keys
@@ -211,8 +230,6 @@ namespace ggml_cuda_fattn_i8qk {
                     const int d0 = d_chunk * 16;
 
                     // A: 2 .b32
-                    // a0 = Q[t/4][d0 + 4*(t%4) .. +3]
-                    // a1 = Q[t/4+8][d0 + 4*(t%4) .. +3]
                     const int a_row0 = lane / 4;
                     const int a_row1 = a_row0 + 8;
                     const int a_col  = 4 * (lane % 4);
@@ -228,14 +245,6 @@ namespace ggml_cuda_fattn_i8qk {
                         s_Q[a_row1 * DKQ + d0 + a_col + 3]);
 
                     // B: 1 .b32
-                    // b0 = K[n0 + 4*(t%4)][d0 + t/4] ... K[n0 + 4*(t%4)+3][d0 + t/4]
-                    // B[k][n] = K_int8[n][d] → s_K[d * NK + n]
-                    // b0 = {B[4*(lane%4)][lane/4], B[4*(lane%4)+1][lane/4],
-                    //        B[4*(lane%4)+2][lane/4], B[4*(lane%4)+3][lane/4]}
-                    //     = {s_K[(d0+4*(lane%4)) * NK + n_off + lane/4],
-                    //        s_K[(d0+4*(lane%4)+1) * NK + n_off + lane/4],
-                    //        s_K[(d0+4*(lane%4)+2) * NK + n_off + lane/4],
-                    //        s_K[(d0+4*(lane%4)+3) * NK + n_off + lane/4]}
                     const int b_row = 4 * (lane % 4);
                     const int b_col = lane / 4;
                     int b0 = pack_i4(
@@ -272,7 +281,7 @@ namespace ggml_cuda_fattn_i8qk {
             for (int i = tid; i < NQ * NK; i += NTHREADS) {
                 const int r = i / NK;
                 const int c = i % NK;
-                float val = s_S[i] * (s_q_scale[r] * s_k_scale * sm_scale);
+                float val = s_S[i] * (s_q_scale[r] * s_k_scale[0] * sm_scale);
                 if (k0 + c > q0 + r) val = -1e30f;
                 s_S[i] = val;
             }
@@ -307,7 +316,7 @@ namespace ggml_cuda_fattn_i8qk {
                 float v = s_S[i];
                 v = (v > -1e29f) ? expf(v - s_m[r]) : 0.0f;
                 s_S[i] = v;
-                s_P[i] = __float2half(v); // store as half for PV MMA
+                s_P[i] = __float2half(v);
             }
             __syncthreads();
 
@@ -336,42 +345,36 @@ namespace ggml_cuda_fattn_i8qk {
             __syncthreads();
 
             // ---------------------------------------------------------
-            // PV via FP16 MMA: O[16][128] += P[16][64] × V[64][128]
+            // PV via FP16 MMA: O[16][256] += P[16][64] × V[64][256]
             //
             // mma.m16n8k16.row.col.f32.f16.f16.f32
             // A[16×16] = P[m][k0+k], B[16×8] = V[k0+k][d0+n]
             // C[16×8] = O[m][d0+n]
             //
-            // 8 warps: warp w → 2 n-chunks (dims w*16..w*16+15), 4 k-chunks
+            // 8 warps: warp w → 32 dims (w*32..w*32+31), 4 k-chunks
             // ---------------------------------------------------------
             {
-                const int d_base = warp_id * 16; // this warp's 16 dims
+                const int d_base = warp_id * 32; // this warp's 32 dims
 
                 #pragma unroll
                 for (int k_chunk = 0; k_chunk < NK / 16; ++k_chunk) {
                     const int k0m = k_chunk * 16;
 
                     #pragma unroll
-                    for (int d_sub = 0; d_sub < 2; ++d_sub) {
+                    for (int d_sub = 0; d_sub < 4; ++d_sub) {
                         const int d0 = d_base + d_sub * 8;
                         float c0 = 0, c1 = 0, c2 = 0, c3 = 0;
 
                         // A: P[m][k] as half2 pairs → 4 .b32
-                        // a0 = P[t/4][4*(t%4) .. +1] as half2
-                        // a1 = P[t/4+8][4*(t%4) .. +1] as half2
-                        // a2 = P[t/4][4*(t%4)+8 .. +9] as half2
-                        // a3 = P[t/4+8][4*(t%4)+8 .. +9] as half2
                         const int a_r0 = lane / 4;
                         const int a_r1 = a_r0 + 8;
-                        const int a_c  = 2 * (lane % 4);  // f16: 2 half per .b32
+                        const int a_c  = 2 * (lane % 4);
                         int a0 = pack_h2(s_P[a_r0 * NK + k0m + a_c],     s_P[a_r0 * NK + k0m + a_c + 1]);
                         int a1 = pack_h2(s_P[a_r1 * NK + k0m + a_c],     s_P[a_r1 * NK + k0m + a_c + 1]);
                         int a2 = pack_h2(s_P[a_r0 * NK + k0m + a_c + 8], s_P[a_r0 * NK + k0m + a_c + 9]);
                         int a3 = pack_h2(s_P[a_r1 * NK + k0m + a_c + 8], s_P[a_r1 * NK + k0m + a_c + 9]);
 
                         // B: V[k][d] as half2 pairs → 2 .b32
-                        // b0 = V[2*(t%4)][t/4] and V[2*(t%4)+1][t/4] as half2
-                        // b1 = V[2*(t%4)+8][t/4] and V[2*(t%4)+9][t/4] as half2
                         const int b_r = 2 * (lane % 4);
                         const int b_c = lane / 4;
                         int b0 = pack_h2(s_V[(k0m + b_r)     * DV + d0 + b_c],
@@ -410,7 +413,7 @@ namespace ggml_cuda_fattn_i8qk {
         __syncthreads();
 
         {
-            const int n_h2 = DV / 2;
+            const int n_h2 = DV / 2; // 128 half2 per row
             for (int i = tid; i < NQ * n_h2; i += NTHREADS) {
                 const int r = i / n_h2;
                 const int c = i % n_h2;
@@ -437,9 +440,15 @@ namespace ggml_cuda_fattn_i8qk {
             int n_heads, int n_kv_heads,
             float sm_scale,
             cudaStream_t stream = 0) {
+        static bool attr_set = false;
+        if (!attr_set) {
+            cudaFuncSetAttribute(flash_attn_i8qk_kernel,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOT);
+            attr_set = true;
+        }
         dim3 grid(n_heads, (seq_q + NQ - 1) / NQ);
         dim3 block(NTHREADS);
-        flash_attn_i8qk_kernel<<<grid, block, 0, stream>>>(
+        flash_attn_i8qk_kernel<<<grid, block, SMEM_TOT, stream>>>(
             Q_h2, K_int8, K_scale, V_q8, O_h2,
             seq_q, seq_k, n_heads, n_kv_heads, sm_scale);
     }
