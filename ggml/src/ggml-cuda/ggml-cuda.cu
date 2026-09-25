@@ -4055,6 +4055,35 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    // Fused FFN: detect pattern MUL_MAT(gate), MUL_MAT(up), GLU and fuse into single kernel
+    if (node->op == GGML_OP_MUL_MAT && i + 2 < cgraph->n_nodes) {
+        const ggml_tensor * ffn_gate = node;
+        const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
+        const ggml_tensor * glu      = cgraph->nodes[i + 2];
+
+        if (ffn_up->op == GGML_OP_MUL_MAT && glu->op == GGML_OP_GLU &&
+            ggml_cuda_should_fuse_mul_mat(ffn_up, ffn_gate, glu)) {
+            // Verify both GEMMs use MMQ-compatible types and the batch size is > 1 (prefill path)
+            const ggml_tensor * src0_gate = ffn_gate->src[0]; // W_gate
+            const ggml_tensor * src0_up   = ffn_up->src[0];   // W_up
+            const ggml_tensor * src1      = ffn_gate->src[1]; // X (activation)
+            const ggml_tensor * dst       = glu;              // ffn output
+
+            const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
+            const bool mmq_ok = ggml_cuda_should_use_mmq(src0_gate->type, cc, src1->ne[1], 1);
+
+            if (mmq_ok && src1->ne[1] > 1 && src0_gate->type == src0_up->type &&
+                ggml_are_same_shape(src0_gate, src0_up)) {
+                ggml_cuda_mul_mat_q_ffn_fused(*cuda_ctx, src0_up, src0_gate, src1, dst);
+#ifdef GGML_CUDA_DEBUG
+                GGML_LOG_INFO("%s: fused FFN (gate+up+SwiGLU) for %s (skipped 2 nodes)\n",
+                              __func__, node->name);
+#endif
+                return 2;
+            }
+        }
+    }
+
     if (node->op == GGML_OP_MUL) {
         ggml_cuda_moe_weighted_reduction_match match;
         if (ggml_cuda_match_moe_weighted_reduction(cgraph, i, match)) {

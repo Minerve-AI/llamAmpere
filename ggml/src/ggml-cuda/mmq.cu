@@ -300,6 +300,102 @@ void ggml_cuda_mul_mat_q(
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
 }
 
+// Fused FFN: computes (W_up @ X) * SiLU(W_gate @ X) in a single kernel.
+void ggml_cuda_mul_mat_q_ffn_fused(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0_up, const ggml_tensor * src0_gate,
+        const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0_up->type  == src0_gate->type);
+    GGML_ASSERT(        src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(         dst->type  == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_are_same_shape(src0_up, src0_gate));
+    GGML_ASSERT(ggml_are_same_shape(src1, src1));
+
+    GGML_TENSOR_BINARY_OP_LOCALS;
+
+    cudaStream_t stream = ctx.stream();
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+
+    const size_t ts_src0 = ggml_type_size(src0_up->type);
+    const size_t ts_src1 = ggml_type_size(src1->type);
+    const size_t ts_dst  = ggml_type_size(dst->type);
+
+    const char  * src0_up_d   = (const char  *) src0_up->data;
+    const char  * src0_gate_d = (const char  *) src0_gate->data;
+    const float * src1_d      = (const float *) src1->data;
+    float       *  dst_d      = (float       *)  dst->data;
+
+    const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
+
+    const int64_t s01 = src0_up->nb[1] / ts_src0;
+    const int64_t s1  =  dst->nb[1] / ts_dst;
+
+    const bool fallback = ne01 % 128 != 0;
+
+    // Quantize activations to Q8_1
+    const size_t y_block_size = sizeof(block_q8_1_mmq);
+    const size_t y_values_per_block = QK8_1_MMQ;
+    const size_t nbytes_src1_q8_1 = ne13*ne12 * ne11*ne10_padded * y_block_size/y_values_per_block +
+        ggml_cuda_mmq_get_J_max(src0_up->type, fallback, cc, ne11) * sizeof(block_q8_1_mmq);
+    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), nbytes_src1_q8_1);
+
+    {
+        const int64_t s11 = src1->nb[1] / ts_src1;
+        const int64_t s12 = src1->nb[2] / ts_src1;
+        const int64_t s13 = src1->nb[3] / ts_src1;
+        quantize_mmq_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0_up->type, ne10, s11, s12, s13,
+                               ne10_padded, ne11, ne12, ne13, stream);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    const int64_t s12 = ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
+    const int64_t s13 = ne12*s12;
+
+    const mmq_args_ffn args = {
+        src0_up_d, src0_up->type, src0_gate_d,
+        (const int *) src1_q8_1.ptr, dst_d,
+        ne00, ne01, ne11, ne1,
+        s01, s1,
+        ne11, ne11};
+
+    switch (src0_up->type) {
+        case GGML_TYPE_Q4_0:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_0, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q4_1:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_1, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_0:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_0, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_1:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_1, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q8_0:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q8_0, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_K:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q2_K, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_K:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q3_K, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q4_K:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_K, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_K:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_K, fallback>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_K:
+            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q6_K, fallback>(ctx, args, stream);
+            break;
+        default:
+            fprintf(stderr, "FFN fused: unsupported type %d\n", (int)src0_up->type);
+            GGML_ABORT("fatal error");
+            break;
+    }
+}
+
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
 #ifdef GGML_CUDA_FORCE_CUBLAS
     return false;
