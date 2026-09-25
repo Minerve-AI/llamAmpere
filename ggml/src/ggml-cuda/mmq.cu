@@ -361,34 +361,44 @@ void ggml_cuda_mul_mat_q_ffn_fused(
 
     switch (src0_up->type) {
         case GGML_TYPE_Q4_0:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_0, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_0, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_0, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q4_1:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_1, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_1, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_1, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q5_0:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_0, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_0, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_0, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q5_1:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_1, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_1, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_1, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q8_0:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q8_0, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q8_0, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q8_0, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q2_K:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q2_K, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q2_K, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q2_K, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q3_K:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q3_K, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q3_K, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q3_K, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q4_K:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_K, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_K, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q4_K, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q5_K:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_K, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_K, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q5_K, false>(ctx, args, stream); }
             break;
         case GGML_TYPE_Q6_K:
-            mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q6_K, fallback>(ctx, args, stream);
+            if (fallback) { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q6_K, true>(ctx, args, stream); }
+            else          { mul_mat_q_ffn_fused_switch_J<GGML_TYPE_Q6_K, false>(ctx, args, stream); }
             break;
         default:
             fprintf(stderr, "FFN fused: unsupported type %d\n", (int)src0_up->type);
