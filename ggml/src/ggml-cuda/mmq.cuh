@@ -1503,7 +1503,7 @@ static __global__ void mul_mat_q_ffn_fused(
     float sum_up[J*I / (nwarps*warp_size)]     = {0.0f};
     float sum_gate[J*I / (nwarps*warp_size)]   = {0.0f};
 
-    for (int kb0 = 0; kb0 < ncols_y/qk; kb0 += blocks_per_iter) {
+    for (int kb0 = 0; kb0 < blocks_per_ne00.z; kb0 += blocks_per_iter) {
         // Load W_up tile
         load_tiles(x_up, tile_x_up, offset_x + kb0, tile_x_max_i, stride_row_x);
         // Load W_gate tile
