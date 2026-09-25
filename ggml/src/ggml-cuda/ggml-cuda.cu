@@ -4814,6 +4814,25 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return 1;
     }
 
+    // Fused CONCAT + SSM_CONV (+ ADD) + SILU: read directly from pre-concat sources
+    if (node->op == GGML_OP_SSM_CONV && node->src[0]->op == GGML_OP_CONCAT &&
+        node->src[0]->src[0]->type == GGML_TYPE_F32 && node->src[0]->src[1]->type == GGML_TYPE_F32 &&
+        node->type == GGML_TYPE_F32) {
+        const int64_t d_conv = node->src[1]->ne[0];
+        const ggml_tensor * cs = node->src[0]->src[0];
+        const ggml_tensor * qk = node->src[0]->src[1];
+        if (cs->ne[0] == d_conv - 1 && qk->ne[0] == node->ne[1]) {
+            if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_SSM_CONV, GGML_OP_ADD, GGML_OP_UNARY }, { GGML_UNARY_OP_SILU })) {
+                ggml_cuda_op_ssm_conv_fused_concat(*cuda_ctx, node, node->src[0], cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
+                return 2;
+            }
+            if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_SSM_CONV, GGML_OP_UNARY }, { GGML_UNARY_OP_SILU })) {
+                ggml_cuda_op_ssm_conv_fused_concat(*cuda_ctx, node, node->src[0], /*bias_add_node=*/ nullptr, cgraph->nodes[i + 1]);
+                return 1;
+            }
+        }
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_SSM_CONV, GGML_OP_ADD, GGML_OP_UNARY }, { GGML_UNARY_OP_SILU })) {
         ggml_cuda_op_ssm_conv(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
         return 2;
