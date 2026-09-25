@@ -4074,7 +4074,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
             if (mmq_ok && src1->ne[1] > 1 && src0_gate->type == src0_up->type &&
                 ggml_are_same_shape(src0_gate, src0_up)) {
-                ggml_cuda_mul_mat_q_ffn_fused(*cuda_ctx, src0_up, src0_gate, src1, dst);
+                ggml_cuda_mul_mat_q_ffn_fused(*cuda_ctx, src0_up, src0_gate, src1,
+                                              const_cast<ggml_tensor *>(dst));
 #ifdef GGML_CUDA_DEBUG
                 GGML_LOG_INFO("%s: fused FFN (gate+up+SwiGLU) for %s (skipped 2 nodes)\n",
                               __func__, node->name);
