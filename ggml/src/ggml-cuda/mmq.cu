@@ -311,6 +311,7 @@ void ggml_cuda_mul_mat_q_ffn_fused(
     GGML_ASSERT(ggml_are_same_shape(src0_up, src0_gate));
     GGML_ASSERT(ggml_are_same_shape(src1, src1));
 
+    const ggml_tensor * src0 = src0_up;
     GGML_TENSOR_BINARY_OP_LOCALS;
 
     cudaStream_t stream = ctx.stream();
