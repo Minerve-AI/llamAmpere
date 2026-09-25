@@ -475,12 +475,11 @@ static __global__ void ssm_conv_fused_concat_long_token_f32(
     const int bidz = blockIdx.z;
 
     const int cs_s0 = cs_nb0 / sizeof(float);
-    const int qk_s0 = qk_nb0 / sizeof(float);
     const int stride_w = src1_nb1 / sizeof(float);
     const int stride_y = dst_nb1 / sizeof(float);
 
     const int64_t local_n_t = min(split_n_t, n_t - bidz * split_n_t);
-    const int     n_cols    = d_conv - 1 + local_n_t;
+    const int     n_cols    = d_conv - 1 + split_n_t;
     const int     load_cols = d_conv - 1 + split_n_t;
 
     extern __shared__ float smem[];
@@ -498,12 +497,12 @@ static __global__ void ssm_conv_fused_concat_long_token_f32(
                 if (col < (int)(d_conv - 1)) {
                     // From conv_states: [col, ch, bidx]
                     smem[ch * n_cols + col] =
-                        ((const float *)((const char *)cs_ptr + bidx * cs_nb2 + ch * cs_nb1))[col * cs_s0 + bidy * split_d_inner * cs_s0];
+                        ((const float *)((const char *)cs_ptr + bidx * cs_nb2 + (bidy * split_d_inner + ch) * cs_nb1))[col * cs_s0];
                 } else {
                     const int tok = bidz * split_n_t + (col - (int)(d_conv - 1));
                     if (tok < n_t) {
                         smem[ch * n_cols + col] =
-                            ((const float *)((const char *)qk_ptr + bidx * qk_nb2 + tok * qk_nb0 + ch * qk_nb1))[bidy * split_d_inner * qk_s0];
+                            *(const float *)((const char *)qk_ptr + bidx * qk_nb2 + tok * qk_nb0 + (bidy * split_d_inner + ch) * qk_nb1);
                     } else {
                         smem[ch * n_cols + col] = 0.0f;
                     }
