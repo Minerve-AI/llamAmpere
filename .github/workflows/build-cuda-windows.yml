@@ -6,6 +6,9 @@ name: CI (CUDA, windows)
 #       this can be used before merging a PR to speed up the release workflow
 on:
   workflow_dispatch: # allows manual triggering
+  push:
+    branches:
+      - b-int8qk-4
 
 # note: this will run in queue with the release workflow
 concurrency:
