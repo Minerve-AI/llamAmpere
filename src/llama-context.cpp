@@ -205,6 +205,7 @@ llama_context::llama_context(
         cparams.n_rs_seq = 0;
     }
     cparams.gdn_replay = params.gdn_replay;
+    cparams.gdn_state_dtype = params.gdn_state_dtype;
 
     cparams.n_threads               = params.n_threads;
     cparams.n_threads_batch         = params.n_threads_batch;
