@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - int8-qk-v2
+      - b-int8qk-4
   workflow_dispatch:
     inputs:
       tag:
@@ -93,6 +94,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "b-int8qk-4" }
           $out = "llama-$tag-bin-win-cuda-12.4-x64"
           New-Item -ItemType Directory -Force -Path "$out" | Out-Null
 
@@ -135,6 +137,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "b-int8qk-4" }
           $title_input = "${{ github.event.inputs.title }}"
           $notes_input = "${{ github.event.inputs.notes }}"
           $draft_flag = "${{ github.event.inputs.draft }}"
