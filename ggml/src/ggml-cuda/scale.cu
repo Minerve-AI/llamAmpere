@@ -1,4 +1,5 @@
 #include "scale.cuh"
+#include <cuda_fp16.h>
 
 #define MAX_GRIDDIM_X 0x7FFFFFFF
 
