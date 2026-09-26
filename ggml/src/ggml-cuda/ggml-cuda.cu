@@ -1,3 +1,10 @@
+// FFN fused kernel (W_up@X * SiLU(W_gate@X)) is disabled: its 2x weight tile
+// shared memory (79 KB) reduces occupancy from 2 to 1 block/SM on RTX 3090,
+// causing a 2x throughput loss. Re-enable after fixing tile sizes.
+#ifndef GGML_CUDA_FFN_FUSION
+#define GGML_CUDA_FFN_FUSION 0
+#endif
+
 #include "ggml-cuda.h"
 #include "moe-devsort.cuh"
 #include "ggml-impl.h"
@@ -4072,6 +4079,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
             const bool mmq_ok = ggml_cuda_should_use_mmq(src0_gate->type, cc, src1->ne[1], 1);
 
+#if GGML_CUDA_FFN_FUSION
             if (mmq_ok && src1->ne[1] > 1 && src0_gate->type == src0_up->type &&
                 ggml_are_same_shape(src0_gate, src0_up)) {
                 ggml_cuda_mul_mat_q_ffn_fused(*cuda_ctx, src0_up, src0_gate, src1,
@@ -4082,6 +4090,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 #endif
                 return 2;
             }
+#endif // GGML_CUDA_FFN_FUSION
         }
     }
 

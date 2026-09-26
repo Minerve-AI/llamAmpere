@@ -487,7 +487,9 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
 #endif
 
     if (turing_mma_available(cc)) {
-        return true;
+        // RTX 3090 (Ampere): use MMQ (dp4a) only for small batches (decode).
+        // For prefill (batch >= 64), fall through to cuBLAS FP16 Tensor Cores.
+        return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
     }
 
     if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
