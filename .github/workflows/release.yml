@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    branches:
+      - int8-qk-v2
   workflow_dispatch:
     inputs:
       tag:
