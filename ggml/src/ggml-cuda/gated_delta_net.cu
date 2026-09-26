@@ -468,7 +468,7 @@ static bool ggml_cuda_sm86_gdn_prefetch() {
     return on;
 }
 
-template <bool keep_rs_t, int NC, bool PREFETCH>
+template <bool keep_rs_t, int NC, bool PREFETCH, bool STATE_F16>
 static void launch_gated_delta_net_ilp_inst(
         const float * q_d, const float * k_d, const float * v_d,
         const float * g_d, const float * b_d, const float * s_d,
