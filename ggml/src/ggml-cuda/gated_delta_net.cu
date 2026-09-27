@@ -698,7 +698,7 @@ static bool launch_gated_delta_net_ilp(
         float scale, int64_t state_slot_stride, int K, cudaStream_t stream) {
     const int  nc       = ggml_cuda_sm86_gdn_cols();
     const bool prefetch = ggml_cuda_sm86_gdn_prefetch();
-    if (S_v != 128 || n_tokens < 2 || (nc == 1 && !prefetch)) {
+    if (true) { // DEBUG: disable ILP, force basic kernel
         return false;
     }
 #define GDN_ILP_LAUNCH(NC_, PF_) \
@@ -736,7 +736,7 @@ static bool launch_gated_delta_net_tiled(
     constexpr int TOKEN_TILE = 16;
     constexpr int block_cols = NUM_WARPS * COLS;
 
-    if (S_v != S_v_ || n_tokens < TOKEN_TILE) {
+    if (true) { // DEBUG: disable tiled, force basic kernel
         return false;
     }
 
