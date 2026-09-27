@@ -348,10 +348,10 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
         GGML_ASSERT(out->type == GGML_TYPE_F16);
         if (fuse_silu) {
             ssm_conv_f16_cuda<true>(src0_d_f16, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d_f16, out->nb[0], out->nb[1],
-                out->nb[2], n_t, stream);
+                out->nb[2], nc, nr, n_t, n_s, stream);
         } else {
             ssm_conv_f16_cuda<false>(src0_d_f16, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d_f16, out->nb[0], out->nb[1],
-                out->nb[2], n_t, stream);
+                out->nb[2], nc, nr, n_t, n_s, stream);
         }
         return;
     }
