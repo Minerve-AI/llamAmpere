@@ -17,7 +17,7 @@ inline __device__ __half gdn_from_float(float x) { return __float2half(x); }
 // instead of a full [S_v,S_v] state snapshot per retained slot, plus one fixed-cost trailing
 // final-state block -- see ggml_gated_delta_net's emit_mode==1 contract (ggml.h) and the CPU
 // reference (ggml-cpu/ops.cpp). Never instantiated with keep_rs_t == false.
-template <typename T_in = float, int S_v = 128, bool KDA = false, bool keep_rs_t = false, bool emit_ingredients_t = false>
+template <typename T_in = float, int S_v = 128, bool KDA = false, bool keep_rs_t = false, bool emit_ingredients_t = false, bool STATE_F16 = false>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
 gated_delta_net_cuda(const T_in * q,
                                      const T_in * k,
@@ -247,10 +247,19 @@ gated_delta_net_cuda(const T_in * q,
     }
 
     if constexpr (!keep_rs_t) {
+        if constexpr (STATE_F16) {
+            __half * state_out_h = (__half *) state_out;
 #pragma unroll
-        for (int r = 0; r < rows_per_lane; r++) {
-            const int i              = r * warp_size + lane;
-            state_out[col * S_v + i] = s_shard[r];
+            for (int r = 0; r < rows_per_lane; r++) {
+                const int i              = r * warp_size + lane;
+                state_out_h[col * S_v + i] = __float2half(s_shard[r]);
+            }
+        } else {
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                const int i              = r * warp_size + lane;
+                state_out[col * S_v + i] = s_shard[r];
+            }
         }
     }
 }
@@ -258,7 +267,7 @@ gated_delta_net_cuda(const T_in * q,
 
 // same per-column math as gated_delta_net_cuda, but each warp owns NC state columns so the
 // NC reduction chains interleave; multi-token, scalar-gate, S_v == 128 only (GGML_CUDA_SM86_GDN_COLS)
-template <typename T_in = float, int S_v, bool keep_rs_t, int NC, bool PREFETCH>
+template <typename T_in = float, int S_v, bool keep_rs_t, int NC, bool PREFETCH, bool STATE_F16 = false>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
 gated_delta_net_cuda_ilp(const T_in * q,
                          const T_in * k,
@@ -454,7 +463,11 @@ gated_delta_net_cuda_ilp(const T_in * q,
         for (int c = 0; c < NC; c++) {
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
-                state[(col0 + c) * S_v + r * warp_size + lane] = s_shard[c][r];
+                if constexpr (STATE_F16) {
+                    ((__half *) state)[(col0 + c) * S_v + r * warp_size + lane] = __float2half(s_shard[c][r]);
+                } else {
+                    state[(col0 + c) * S_v + r * warp_size + lane] = s_shard[c][r];
+                }
             }
         }
     }
@@ -621,7 +634,11 @@ gated_delta_net_tiled_cuda(const T_in * q,
         for (int c = 0; c < COLS; c++) {
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
-                state[(col0 + colw + c) * S_v + r * warp_size + lane] = s_shard[c][r];
+                if constexpr (STATE_F16) {
+                    ((__half *) state)[(col0 + colw + c) * S_v + r * warp_size + lane] = __float2half(s_shard[c][r]);
+                } else {
+                    state[(col0 + colw + c) * S_v + r * warp_size + lane] = s_shard[c][r];
+                }
             }
         }
     }
@@ -645,7 +662,7 @@ static bool ggml_cuda_sm86_gdn_prefetch() {
     return on;
 }
 
-template <typename T_in = float, bool keep_rs_t, int NC, bool PREFETCH>
+template <typename T_in = float, bool keep_rs_t, int NC, bool PREFETCH, bool STATE_F16 = false>
 static void launch_gated_delta_net_ilp_inst(
         const T_in * q_d, const T_in * k_d, const T_in * v_d,
         const T_in * g_d, const T_in * b_d, const float * s_d,
@@ -667,14 +684,14 @@ static void launch_gated_delta_net_ilp_inst(
     const uint3 rq3_magic   = init_fastdiv_values(rq3);
 
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid_dims, block_dims, 0, stream);
-    ggml_cuda_kernel_launch(gated_delta_net_cuda_ilp<T_in, S_v, keep_rs_t, NC, PREFETCH>, launch_params,
+    ggml_cuda_kernel_launch(gated_delta_net_cuda_ilp<T_in, S_v, keep_rs_t, NC, PREFETCH, STATE_F16>, launch_params,
         q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
         n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
         sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
 }
 
 // returns false when this path does not apply; caller falls back to the original kernel
-template <typename T_in = float, bool keep_rs_t>
+template <typename T_in = float, bool keep_rs_t, bool STATE_F16 = false>
 static bool launch_gated_delta_net_ilp(
         const T_in * q_d, const T_in * k_d, const T_in * v_d,
         const T_in * g_d, const T_in * b_d, const float * s_d,
@@ -691,7 +708,7 @@ static bool launch_gated_delta_net_ilp(
         return false;
     }
 #define GDN_ILP_LAUNCH(NC_, PF_) \
-    launch_gated_delta_net_ilp_inst<T_in, keep_rs_t, NC_, PF_>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, \
+    launch_gated_delta_net_ilp_inst<T_in, keep_rs_t, NC_, PF_, STATE_F16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, \
         H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3, sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)
     if (nc == 8) {
         if (prefetch) { GDN_ILP_LAUNCH(8, true); } else { GDN_ILP_LAUNCH(8, false); }
@@ -708,7 +725,7 @@ static bool launch_gated_delta_net_ilp(
 
 
 // returns false when this path does not apply; caller falls back to the ILP or original kernel
-template <typename T_in = float, bool keep_rs_t>
+template <typename T_in = float, bool keep_rs_t, bool STATE_F16 = false>
 static bool launch_gated_delta_net_tiled(
         const T_in * q_d, const T_in * k_d, const T_in * v_d,
         const T_in * g_d, const T_in * b_d, const float * s_d,
@@ -725,6 +742,9 @@ static bool launch_gated_delta_net_tiled(
     constexpr int TOKEN_TILE = 16;
     constexpr int block_cols = NUM_WARPS * COLS;
 
+    if constexpr (STATE_F16) {
+        return false;
+    }
     if (S_v != S_v_ || n_tokens < TOKEN_TILE) {
         return false;
     }
@@ -744,7 +764,7 @@ static bool launch_gated_delta_net_tiled(
     return true;
 }
 
-template <typename T_in = float, bool KDA, bool keep_rs_t, bool emit_ingredients_t>
+template <typename T_in = float, bool KDA, bool keep_rs_t, bool emit_ingredients_t, bool STATE_F16 = false>
 static void launch_gated_delta_net(
         const T_in * q_d, const T_in * k_d, const T_in * v_d,
         const T_in * g_d, const T_in * b_d, const float * s_d,
@@ -767,26 +787,26 @@ static void launch_gated_delta_net(
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid_dims, block_dims, 0, stream);
     switch (S_v) {
         case 16:
-            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 16, KDA, keep_rs_t, emit_ingredients_t>, launch_params,
+            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 16, KDA, keep_rs_t, emit_ingredients_t, STATE_F16>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
             break;
         case 32:
-            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 32, KDA, keep_rs_t, emit_ingredients_t>, launch_params,
+            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 32, KDA, keep_rs_t, emit_ingredients_t, STATE_F16>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
             break;
         case 64: {
-            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 64, KDA, keep_rs_t, emit_ingredients_t>, launch_params,
+            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 64, KDA, keep_rs_t, emit_ingredients_t, STATE_F16>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
             break;
         }
         case 128: {
-            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 128, KDA, keep_rs_t, emit_ingredients_t>, launch_params,
+            ggml_cuda_kernel_launch(gated_delta_net_cuda<T_in, 128, KDA, keep_rs_t, emit_ingredients_t, STATE_F16>, launch_params,
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
@@ -885,7 +905,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
                     S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
                     sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
             } else if (keep_rs_f16) {
-                if (launch_gated_delta_net_tiled<__half, true>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                if (launch_gated_delta_net_tiled<__half, true, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
                         S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
                         sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16)) {
                     return;
@@ -899,7 +919,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
                     S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
                     sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16);
             } else {
-                if (launch_gated_delta_net_tiled<__half, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
+                if (launch_gated_delta_net_tiled<__half, false, false>(q_d_f16, k_d_f16, v_d_f16, g_d_f16, b_d_f16, s_d_f16, dst_d_f16, state_d_f16,
                         S_v, H, n_tokens, n_seqs, sq1_f16, sq2_f16, sq3_f16, sv1_f16, sv2_f16, sv3_f16,
                         sb1_f16, sb2_f16, sb3_f16, neqk1, rq3, scale_f16, state_slot_stride_f16, K_f16, stream_f16)) {
                     return;
@@ -972,49 +992,49 @@ static void ggml_cuda_op_gated_delta_net_impl(
 
     if (kda) {
         if (emit_ingr) {
-            launch_gated_delta_net<float, true, true, true>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, true, true, true, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         } else if (keep_rs) {
-            launch_gated_delta_net<float, true, true, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, true, true, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         } else {
-            launch_gated_delta_net<float, true, false, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, true, false, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         }
     } else {
         if (emit_ingr) {
-            launch_gated_delta_net<float, false, true, true>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, false, true, true, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         } else if (keep_rs) {
-            if (launch_gated_delta_net_tiled<float, true>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            if (launch_gated_delta_net_tiled<float, true, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                     S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                     sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)) {
                 return;
             }
-            if (launch_gated_delta_net_ilp<float, true>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            if (launch_gated_delta_net_ilp<float, true, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                     S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                     sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)) {
                 return;
             }
-            launch_gated_delta_net<float, false, true, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, false, true, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         } else {
-            if (launch_gated_delta_net_tiled<float, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            if (launch_gated_delta_net_tiled<float, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                     S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                     sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)) {
                 return;
             }
-            if (launch_gated_delta_net_ilp<float, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            if (launch_gated_delta_net_ilp<float, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                     S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                     sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream)) {
                 return;
             }
-            launch_gated_delta_net<float, false, false, false>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
+            launch_gated_delta_net<float, false, false, false, state_f16>(q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d,
                 S_v, H, n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
                 sb1, sb2, sb3, neqk1, rq3, scale, state_slot_stride, K, stream);
         }
