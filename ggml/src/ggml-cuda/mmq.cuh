@@ -1529,6 +1529,7 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
     const int    id    = ggml_cuda_get_device();
     const int    cc    = ggml_cuda_info().devices[id].cc;
     const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+    const int    nsm   = ggml_cuda_info().devices[id].nsm;
 
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
@@ -1545,10 +1546,27 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
 
         const int ntiles_x = (args.ncols_opt + config.J - 1) / config.J;
 
+        // Ensure sufficient grid parallelism: the total number of blocks must
+        // be large enough to keep all SMs busy. For small-M layers (e.g. KV
+        // projection with M=1024), a large J produces too few blocks and
+        // leaves most SMs idle. Require at least 2 blocks per SM on average.
+        const int nwarps   = config.nthreads / 32;
+        const int grid_M   = (args.nrows_x + J * nwarps - 1) / (J * nwarps);
+        const int total_blks = grid_M * ntiles_x;
+        if (total_blks < nsm * 2) {
+            continue;
+        }
+
         if (ntiles_x < ntiles_J_best) {
             J_best = J;
             ntiles_J_best = ntiles_x;
         }
+    }
+
+    // Fallback: if no J satisfied the parallelism constraint (e.g. very small
+    // M and N), use the smallest tile to maximise grid size.
+    if (J_best == 0) {
+        J_best = 8;
     }
 
     switch (J_best) {
