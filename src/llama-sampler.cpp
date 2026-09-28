@@ -1660,14 +1660,26 @@ static void llama_sampler_top_p_backend_apply(
     auto * sctx = (llama_sampler_top_p *) smpl->ctx;
 
     struct ggml_tensor * logits = llama_sampler_backend_rows_2d(ctx, data->logits); // [n, n_rows]
-    const int64_t n      = logits->ne[0];
     const int64_t n_rows = logits->ne[1];
 
-    // Get the sorted logits in descending order (per row).
-    struct ggml_tensor * sorted_idx = ggml_argsort(ctx, logits, GGML_SORT_ORDER_DESC); // [n, n_rows]
+    // Pre-filter: get top-k indices (O(N) via CUB DeviceTopK, replaces full O(N log N) radix sort).
+    // Top-p threshold is always within the top-k for any reasonable p value.
+    const int64_t k = 256;
+    struct ggml_tensor * top_k_idx = ggml_top_k(ctx, logits, k); // [k, n_rows]
+    ggml_set_name(top_k_idx, "top_p_top_k_idx");
+
+    // Sort only the top-k subset (O(k log k), trivial compared to full sort).
+    struct ggml_tensor * top_k_logits = llama_sampler_backend_gather_rows(ctx, logits, top_k_idx);
+    ggml_set_name(top_k_logits, "top_p_top_k_logits");
+
+    struct ggml_tensor * sorted_k_idx = ggml_argsort(ctx, top_k_logits, GGML_SORT_ORDER_DESC); // [k, n_rows]
+    ggml_set_name(sorted_k_idx, "top_p_sorted_k_idx");
+
+    // Map back to original vocabulary indices.
+    struct ggml_tensor * sorted_idx = llama_sampler_backend_gather_rows(ctx, top_k_idx, sorted_k_idx); // [k, n_rows]
     ggml_set_name(sorted_idx, "top_p_sorted_idx");
 
-    // Do the sorting via reshape + get_rows
+    // Gather the sorted top-k logits from the original tensor.
     struct ggml_tensor * sorted_logits = llama_sampler_backend_gather_rows(ctx, logits, sorted_idx);
     ggml_set_name(sorted_logits, "top_p_sorted_logits");
 
@@ -1706,10 +1718,10 @@ static void llama_sampler_top_p_backend_apply(
     ggml_set_name(ones, "top_p_ones");
 
     // Make top-p inclusive (i.e. return all values such that cum_sum/cdf >= p): set mask[idx] = 1 per row
-    struct ggml_tensor * mask_reshaped = ggml_reshape_3d(ctx, mask, 1, n, n_rows);
+    struct ggml_tensor * mask_reshaped = ggml_reshape_3d(ctx, mask, 1, k, n_rows);
 
     mask_reshaped = ggml_set_rows(ctx, mask_reshaped, ggml_reshape_3d(ctx, ones, 1, 1, n_rows), ggml_cast(ctx, idxf, GGML_TYPE_I32));
-    mask = ggml_reshape_2d(ctx, mask_reshaped, n, n_rows);
+    mask = ggml_reshape_2d(ctx, mask_reshaped, k, n_rows);
 
     // Apply -INFINITY bias for masked-out tokens
     // log(1) = 0 (keep), log(0) = -INF (discard)
