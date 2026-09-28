@@ -4354,6 +4354,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_GDN_REPLAY"));
 
     add_opt(common_arg(
+        {"--gdn-state-dtype"}, "DTYPE",
+        "dtype for GDN recurrent state (f32, f16) (default: f32)",
+        [](common_params & params, const std::string & value) {
+            if (value == "f16" || value == "fp16" || value == "float16") {
+                params.gdn_state_dtype = "f16";
+            } else if (value == "f32" || value == "fp32" || value == "float32") {
+                params.gdn_state_dtype = "f32";
+            } else {
+                throw std::invalid_argument("invalid GDN state dtype: " + value);
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_GDN_STATE_DTYPE"));
+
+    add_opt(common_arg(
         {"--spec-draft-p-split", "--draft-p-split"}, "P",
         string_format("speculative decoding split probability (default: %.2f)", (double)params.speculative.draft.p_split),
         [](common_params & params, const std::string & value) {
