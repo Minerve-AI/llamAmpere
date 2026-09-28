@@ -80,10 +80,19 @@ gated_delta_net_cuda(const T_in * q,
     // state is stored transposed: M[col][i] = S[i][col], row col is contiguous
 
     ggml_cuda_pdl_sync();
+    if constexpr (STATE_F16) {
+        const __half * curr_state_h = (const __half *) curr_state;
 #pragma unroll
-    for (int r = 0; r < rows_per_lane; r++) {
-        const int i = r * warp_size + lane;
-        s_shard[r]  = curr_state[i];
+        for (int r = 0; r < rows_per_lane; r++) {
+            const int i = r * warp_size + lane;
+            s_shard[r]  = __half2float(curr_state_h[i]);
+        }
+    } else {
+#pragma unroll
+        for (int r = 0; r < rows_per_lane; r++) {
+            const int i = r * warp_size + lane;
+            s_shard[r]  = curr_state[i];
+        }
     }
 
     for (int t = 0; t < n_tokens; t++) {
@@ -299,11 +308,22 @@ gated_delta_net_cuda_ilp(const T_in * q,
     float s_shard[NC][rows_per_lane];
 
     ggml_cuda_pdl_sync();
+    if constexpr (STATE_F16) {
+        const __half * curr_state_h = (const __half *) curr_state;
 #pragma unroll
-    for (int c = 0; c < NC; c++) {
+        for (int c = 0; c < NC; c++) {
 #pragma unroll
-        for (int r = 0; r < rows_per_lane; r++) {
-            s_shard[c][r] = curr_state[c * S_v + r * warp_size + lane];
+            for (int r = 0; r < rows_per_lane; r++) {
+                s_shard[c][r] = __half2float(curr_state_h[c * S_v + r * warp_size + lane]);
+            }
+        }
+    } else {
+#pragma unroll
+        for (int c = 0; c < NC; c++) {
+#pragma unroll
+            for (int r = 0; r < rows_per_lane; r++) {
+                s_shard[c][r] = curr_state[c * S_v + r * warp_size + lane];
+            }
         }
     }
 
@@ -936,6 +956,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
     const int  emit_mode = ggml_get_op_params_i32(dst, 1);
     const bool keep_rs   = (K > 1) || (emit_mode != 0);
     const bool emit_ingr = (emit_mode == 1);
+    const bool state_f16 = (src_state->type == GGML_TYPE_F16);
 
     // recurrent state -> gdn_out tail (after attention scores), or the cache when fusing.
     // emit_ingr slots are 4*S_v wide (k,v,g,beta) instead of S_v*S_v (a full state matrix);
