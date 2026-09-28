@@ -634,11 +634,7 @@ gated_delta_net_tiled_cuda(const T_in * q,
         for (int c = 0; c < COLS; c++) {
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
-                if constexpr (STATE_F16) {
-                    ((__half *) state)[(col0 + colw + c) * S_v + r * warp_size + lane] = __float2half(s_shard[c][r]);
-                } else {
-                    state[(col0 + colw + c) * S_v + r * warp_size + lane] = s_shard[c][r];
-                }
+                state[(col0 + colw + c) * S_v + r * warp_size + lane] = s_shard[c][r];
             }
         }
     }
