@@ -106,6 +106,16 @@ int llama_server(int argc, char ** argv) {
         return 1;
     }
 
+    // propagate CLI flags to env vars for components that check them
+    if (params.no_paged_kv) {
+        setenv("LLAMA_NO_PAGED_KV", "1", 1);
+    }
+    if (params.max_concurrency > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", params.max_concurrency);
+        setenv("LLAMA_MAX_CONCURRENCY", buf, 1);
+    }
+
     llama_backend_init();
     llama_numa_init(params.numa);
 
