@@ -2631,10 +2631,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         // --no-paged-kv: disable paged KV cache
         //
         add_opt(common_arg(
+            {"--paged-kv"},
             {"--no-paged-kv"},
-            "disable paged KV cache (fallback to contiguous ring buffer)",
+            "whether to enable paged KV cache (default: enabled)",
             [](common_params & params, bool value) {
-                params.no_paged_kv = value;
+                params.no_paged_kv = !value;
             }
         ).set_env("LLAMA_NO_PAGED_KV").set_examples({LLAMA_EXAMPLE_SERVER}));
     } else {
