@@ -633,6 +633,14 @@ llama_kv_cache::llama_kv_cache(
     //
     // Paged KV Cache initialization
     //
+    {
+        const char * env_no_paged = getenv("LLAMA_NO_PAGED_KV");
+        if (env_no_paged && env_no_paged[0] == '1') {
+            use_paged_kv = false;
+            LLAMA_LOG_INFO("%s: paged KV cache DISABLED (LLAMA_NO_PAGED_KV=1)\n", __func__);
+        }
+    }
+
     if (use_paged_kv) {
         const uint32_t page_size = llama_kv_page_table::DEFAULT_PAGE_SIZE;
         uint32_t n_pages = kv_size / page_size;
@@ -647,6 +655,13 @@ void llama_kv_cache::clear(bool data) {
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
+    }
+
+    // Reset paged KV cache
+    if (use_paged_kv) {
+        for (uint32_t s = 0; s < n_seq_max; ++s) {
+            page_table.free_seq(s);
+        }
     }
 
     if (data) {
