@@ -67,13 +67,36 @@ static common_speculative_output_limits server_output_limits(const common_params
         return { params.n_batch, 1 };
     }
 
+    //
+    // C-Selector: --concurrency C1|C2|C4|C8 (or LLAMA_MAX_CONCURRENCY env var)
+    // Hard-limits effective parallelism for stable CUDA Graph capture + KV pool sizing
+    //
+    int c_selector = params.max_concurrency;
+    if (c_selector == 0) {
+        const char * env = std::getenv("LLAMA_MAX_CONCURRENCY");
+        if (env) {
+            int v = atoi(env);
+            if (v == 1 || v == 2 || v == 4 || v == 8) {
+                c_selector = v;
+            }
+        }
+    }
+    if (c_selector > 0) {
+        fprintf(stderr, "[server] C-selector: C%d mode (n_parallel limited to %d)\n", c_selector, c_selector);
+    }
+
+    int32_t n_parallel_eff = params.n_parallel;
+    if (c_selector > 0) {
+        n_parallel_eff = std::min(n_parallel_eff, c_selector);
+    }
+
     // Account for draft modes enabled by convenience flags before their types are added.
     int32_t n_max = common_speculative_n_max(&params.speculative);
     if (params.speculative.draft.dflash || params.speculative.draft.eagle3) {
         n_max = std::max(n_max, params.speculative.draft.n_max);
     }
 
-    auto result = common_speculative_get_output_limits(params.n_batch, params.n_parallel, n_max);
+    auto result = common_speculative_get_output_limits(params.n_batch, n_parallel_eff, n_max);
 
     result.total   = std::max<int32_t>(1, result.total);
     result.per_seq = std::max<int32_t>(1, result.per_seq);
