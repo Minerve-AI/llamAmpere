@@ -4,6 +4,7 @@
 #include "llama-graph.h"
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
+#include "llama-kv-pages.h"
 
 #include <unordered_map>
 #include <vector>
@@ -166,6 +167,13 @@ public:
 
     bool get_has_shift() const;
 
+    // Paged KV cache API
+    bool get_use_paged_kv() const { return use_paged_kv; }
+    const llama_kv_page_table & get_page_table() const { return page_table; }
+    void paged_kv_stats() const { page_table.print_stats(); }
+    uint32_t paged_kv_n_free() const { return page_table.n_free(); }
+    uint32_t paged_kv_n_used() const { return page_table.n_used(); }
+
     ggml_type type_k() const;
     ggml_type type_v() const;
 
@@ -313,6 +321,13 @@ private:
 
     // TODO: temporary until we refactor to be able to share the same cells between 2 kv caches [TAG_KV_CACHE_SHARE_CELLS]
     llama_kv_cache * other;
+
+    //
+    // Paged KV Cache
+    //
+    bool use_paged_kv = true;
+    llama_kv_page_table page_table;
+    uint32_t * d_page_table = nullptr; // GPU-side page table (cudaMalloc'd)
 
     std::shared_ptr<llama_kv_cells_vec> v_cells_impl;
 
