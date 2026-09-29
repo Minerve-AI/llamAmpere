@@ -629,6 +629,18 @@ llama_kv_cache::llama_kv_cache(
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+
+    //
+    // Paged KV Cache initialization
+    //
+    if (use_paged_kv) {
+        const uint32_t page_size = llama_kv_page_table::DEFAULT_PAGE_SIZE;
+        uint32_t n_pages = kv_size / page_size;
+        if (n_pages == 0) n_pages = 1;
+        page_table = llama_kv_page_table(n_pages, n_seq_max, page_size);
+        LLAMA_LOG_INFO("%s: paged KV cache: %u pages x %u tok = %u tok capacity (n_seq_max=%u)\n",
+                       __func__, n_pages, page_size, n_pages * page_size, n_seq_max);
+    }
 }
 
 void llama_kv_cache::clear(bool data) {
@@ -3216,5 +3228,3 @@ void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
 void llama_kv_cache_context::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const {
     kv->get_prev_tokens(ubatch, n, res);
 }
-
-// NOTE: paged KV init needs to be added to constructor
