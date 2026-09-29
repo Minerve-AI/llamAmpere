@@ -2611,6 +2611,32 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.n_parallel = value;
             }
         ).set_env("LLAMA_ARG_N_PARALLEL").set_examples({LLAMA_EXAMPLE_SERVER}));
+
+        //
+        // C-Selector: --concurrency C1|C2|C4|C8
+        // Hard-limits effective parallelism for stable CUDA Graph capture
+        //
+        add_opt(common_arg(
+            {"--concurrency"}, "C",
+            "max concurrency level: 1, 2, 4, or 8 (limits n_parallel, enables pre-allocated KV pool + CUDA Graphs)",
+            [](common_params & params, int value) {
+                if (value != 1 && value != 2 && value != 4 && value != 8) {
+                    throw std::invalid_argument("error: --concurrency must be 1, 2, 4, or 8\n");
+                }
+                params.max_concurrency = value;
+            }
+        ).set_env("LLAMA_MAX_CONCURRENCY").set_examples({LLAMA_EXAMPLE_SERVER}));
+
+        //
+        // --no-paged-kv: disable paged KV cache
+        //
+        add_opt(common_arg(
+            {"--no-paged-kv"},
+            "disable paged KV cache (fallback to contiguous ring buffer)",
+            [](common_params & params, bool value) {
+                params.no_paged_kv = value;
+            }
+        ).set_env("LLAMA_NO_PAGED_KV").set_examples({LLAMA_EXAMPLE_SERVER}));
     } else {
         add_opt(common_arg(
             {"-np", "--parallel"}, "N",
