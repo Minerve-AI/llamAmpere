@@ -108,12 +108,20 @@ int llama_server(int argc, char ** argv) {
 
     // propagate CLI flags to env vars for components that check them
     if (params.no_paged_kv) {
+#ifdef _WIN32
+        _putenv_s("LLAMA_NO_PAGED_KV", "1");
+#else
         setenv("LLAMA_NO_PAGED_KV", "1", 1);
+#endif
     }
     if (params.max_concurrency > 0) {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d", params.max_concurrency);
+#ifdef _WIN32
+        _putenv_s("LLAMA_MAX_CONCURRENCY", buf);
+#else
         setenv("LLAMA_MAX_CONCURRENCY", buf, 1);
+#endif
     }
 
     llama_backend_init();
