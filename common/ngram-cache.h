@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "unordered_dense.h"
+
 #define LLAMA_NGRAM_MIN    1
 #define LLAMA_NGRAM_MAX    4
 #define LLAMA_NGRAM_STATIC 2
@@ -59,7 +61,8 @@ struct common_ngram_hash_function {
 typedef std::unordered_map<llama_token, int32_t> common_ngram_cache_part;
 
 // n-gram -> empirical distribution of following tokens
-typedef std::unordered_map<common_ngram, common_ngram_cache_part, common_ngram_hash_function> common_ngram_cache;
+// Using ankerl::unordered_dense::map for better cache locality and lower memory usage
+typedef ankerl::unordered_dense::map<common_ngram, common_ngram_cache_part, common_ngram_hash_function> common_ngram_cache;
 
 
 // Update an ngram cache with tokens.
