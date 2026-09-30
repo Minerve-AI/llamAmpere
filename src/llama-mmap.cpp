@@ -573,14 +573,28 @@ struct llama_mmap::impl {
 #elif defined(_WIN32)
     HANDLE hMapping = nullptr;
 
-    impl(struct llama_file * file, size_t prefetch, bool numa, const llama_mmap::ranges & lazy_ranges) {
+    impl(struct llama_file * file, size_t prefetch, bool numa, const llama_mmap::ranges & lazy_ranges,
+         bool use_huge_pages = false) {
         GGML_UNUSED(numa);
 
         size = file->size();
 
         HANDLE hFile = (HANDLE) _get_osfhandle(file->file_id());
 
-        hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        DWORD map_flags = PAGE_READONLY;
+        if (use_huge_pages) {
+            // Try large pages first (requires SeLockMemoryPrivilege)
+            hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY | SEC_LARGE_PAGES, 0, 0, NULL);
+            if (hMapping == NULL) {
+                LLAMA_LOG_WARN("warning: large pages not available (error: %s), falling back to regular mapping\n",
+                        llama_format_win_err(GetLastError()).c_str());
+                hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+            } else {
+                LLAMA_LOG_INFO("using large pages (2 MiB) for model weights mapping\n");
+            }
+        } else {
+            hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        }
 
         if (hMapping == NULL) {
             DWORD error = GetLastError();
@@ -664,7 +678,8 @@ struct llama_mmap::impl {
 };
 
 llama_mmap::llama_mmap(struct llama_file * file, size_t prefetch, bool numa,
-        const ranges & lazy_ranges) : pimpl(std::make_unique<impl>(file, prefetch, numa, lazy_ranges)) {}
+        const ranges & lazy_ranges, bool use_huge_pages)
+        : pimpl(std::make_unique<impl>(file, prefetch, numa, lazy_ranges, use_huge_pages)) {}
 llama_mmap::~llama_mmap() = default;
 
 size_t llama_mmap::size() const { return pimpl->size; }
