@@ -879,6 +879,7 @@ static __device__ __forceinline__ void vec_dot_ptq1_0_q8_1_multi(const void * __
 // (elements 80+t*8+4(l&1)..+3) at trit steps t<3 for lanes 0/1 and t>=3 for lanes 2/3, and lanes 2/3 each take one
 // of the two qh groups (elements 120..123 / 124..127). Every lane therefore issues 8 dp4a per column. Integer sums
 // per 32-element sub-block are exact; the float combine across lanes happens in the caller's warp reduction.
+//
 // V6 layout of the same work (bit-identical sums, ~2x fewer instructions per row at width 4):
 //  - the y side (the lane's 8 y ints per column, the 4 sub-block scales and the exact per-sub-block sum of y) is
 //    loaded once per k step into ptq1_lane_y and shared by every row of the block;
@@ -1014,6 +1015,7 @@ static __device__ __forceinline__ void vec_dot_ptq1_0_q8_1_lane(const void * __r
         }
         result[j] = d * acc;
     }
+}
 
 // PTQ1_0 x Q8_1. One call consumes the full 128-weight block.
 static __device__ __forceinline__ float vec_dot_ptq1_0_q8_1(const void * __restrict__ vbq,
@@ -1383,40 +1385,6 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
 #define VDR_IQ2_XXS_Q8_1_MMVQ 2
 #define VDR_IQ2_XXS_Q8_1_MMQ  2
 
-static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
-
-    const block_iq2_xxs * bq2 = (const block_iq2_xxs *) vbq + kbx;
-
-    const int q2 = get_int_b2(bq2->qs, iqs);
-    const uint8_t * aux8 = (const uint8_t *) &q2;
-    const uint32_t aux32 = get_int_b2(bq2->qs, iqs + 1);
-
-    int sumi = 0;
-#pragma unroll
-    for (int k0 = 0; k0 < 8; k0 += 2) {
-        const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[k0/2]];
-        const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
-
-        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
-        const int grid0 = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int u0 = get_int_b4(bq8_1[iqs/2].qs, k0 + 0);
-        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
-
-        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
-        const int grid1 = __vsub4(grid_pos.y ^ signs1, signs1);
-        const int u1 = get_int_b4(bq8_1[iqs/2].qs, k0 + 1);
-        sumi = ggml_cuda_dp4a(grid1, u1, sumi);
-    }
-
-    const int ls = aux32 >> 27 | 1; // (scale * 2 + 1)
-    sumi = sumi * ls / 8;           // (sumi * scale + sumi / 2) / 4
-    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs/2].ds);
-    return d * sumi;
-}
-
-#define VDR_IQ2_XXS_Q8_1_MMQ  2
-
 static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1_impl(
     const uint2 * __restrict__ grid,
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
@@ -1453,47 +1421,6 @@ static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1_impl(
 static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
     return vec_dot_iq2_xxs_q8_1_impl((const uint2 *) iq2xxs_grid, vbq, bq8_1, kbx, iqs);
-}
-
-#define VDR_IQ2_XS_Q8_1_MMVQ 2
-#define VDR_IQ2_XS_Q8_1_MMQ  2
-
-static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
-
-    const block_iq2_xs * bq2 = (const block_iq2_xs *) vbq + kbx;
-
-    const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
-    const uint16_t * q2 = (const uint16_t *) &q2_packed;
-    const int ls0 = bq2->scales[iqs/2] & 0x0F;
-    const int ls1 = bq2->scales[iqs/2] >> 4;
-
-    int sumi0 = 0;
-    int sumi1 = 0;
-#pragma unroll
-    for (int l0 = 0; l0 < 8; l0 += 2) {
-        const uint2 grid_pos = ((const uint2*)iq2xs_grid)[q2[l0/2] & 0x1FF];
-        const uint32_t signs = unpack_ksigns(q2[l0/2] >> 9);
-
-        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
-        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
-
-        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
-        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
-        const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
-
-        if (l0 < 4) {
-            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
-            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
-        } else {
-            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
-            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
-        }
-    }
-    const int sumi = (sumi0*ls0 + sumi1*ls1 + (sumi0 + sumi1)/2)/4;
-    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs/2].ds);
-    return d * sumi;
 }
 
 #define VDR_IQ2_XS_Q8_1_MMVQ 2
@@ -1543,55 +1470,7 @@ static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
     return vec_dot_iq2_xs_q8_1_impl((const uint2 *) iq2xs_grid, vbq, bq8_1, kbx, iqs);
 }
 
-
 #define VDR_IQ2_S_Q8_1_MMVQ 2
-#define VDR_IQ2_S_Q8_1_MMQ  2
-
-static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
-
-    const block_iq2_s * bq2 = (const block_iq2_s *) vbq + kbx;
-
-    const int       qs_packed = get_int_b2(bq2->qs, iqs/2);
-    const uint8_t * qs        = (const uint8_t *) &qs_packed;
-
-    const int qh = bq2->qh[iqs/2];
-
-    const int       signs_packed_32 = get_int_b2(bq2->qs, QK_K/32 + iqs/2);
-    const uint8_t * signs_packed_8  = (const uint8_t *) &signs_packed_32;
-
-    const int ls0 = bq2->scales[iqs/2] & 0x0F;
-    const int ls1 = bq2->scales[iqs/2] >> 4;
-
-    int sumi0 = 0;
-    int sumi1 = 0;
-#pragma unroll
-    for (int l0 = 0; l0 < 8; l0 += 2) {
-        const int * grid_pos = (const int *)(iq2s_grid + (qs[l0/2] | ((qh << (8-l0)) & 0x300)));
-
-        const int signs0 = __vcmpne4(((signs_packed_8[l0/2] & 0x03) << 7) | ((signs_packed_8[l0/2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0/2] & 0x30) << 3) | ((signs_packed_8[l0/2] & 0xC0) << 17), 0x00000000);
-
-        const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
-        const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
-
-        const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
-        const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
-
-        if (l0 < 4) {
-            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
-            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
-        } else {
-            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
-            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
-        }
-    }
-    const int sumi = (sumi0*ls0 + sumi1*ls1 + (sumi0 + sumi1)/2)/4;
-
-    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs/2].ds);
-    return d * sumi;
-}
-
 #define VDR_IQ2_S_Q8_1_MMQ  2
 
 static __device__ __forceinline__ float vec_dot_iq2_s_q8_1_impl(
@@ -1644,7 +1523,6 @@ static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
     return vec_dot_iq2_s_q8_1_impl((const uint2 *) iq2s_grid, vbq, bq8_1, kbx, iqs);
 }
-
 
 #define VDR_IQ3_XXS_Q8_1_MMVQ 2
 #define VDR_IQ3_XXS_Q8_1_MMQ  2
