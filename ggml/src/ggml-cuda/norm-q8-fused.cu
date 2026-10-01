@@ -91,8 +91,7 @@ static __global__ void add_rms_norm_mul_f16_q8(const __half * __restrict__ x,
 
             const float qsum = warp_reduce_sum<QK8_1>((float)q);
             if (lane == 0) {
-                yq[ib].d = __float2half(d);
-                yq[ib].s = __float2half(d * qsum);
+                yq[ib].ds = __halves2half2(__float2half(d), __float2half(d * qsum));
             }
         }
     }
