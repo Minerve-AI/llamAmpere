@@ -4048,11 +4048,11 @@ static int ggml_cuda_fuse_elem_chain(ggml_backend_cuda_context & ctx, const ggml
     return -1;
 }
 
-// [#46] ADD + RMS_NORM + MUL Q8_0 prefill: enabled with GGML_CUDA_ADD_RMS_Q8=1
+// [#46] ADD + RMS_NORM + MUL Q8_0 prefill: enabled by default, disable with GGML_CUDA_ADD_RMS_Q8=0
 static bool ggml_cuda_add_rms_q8_enabled() {
     static const bool enabled = [] {
         const char * e = getenv("GGML_CUDA_ADD_RMS_Q8");
-        return e != nullptr && atoi(e) != 0;
+        return e == nullptr || atoi(e) != 0;
     }();
     return enabled;
 }
