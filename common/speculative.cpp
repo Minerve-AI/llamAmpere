@@ -3579,6 +3579,14 @@ common_speculative * common_speculative_init(common_params_speculative & params,
             has_draft_eagle3 = true;
         }
 
+        // --spec-adaptive on: promote draft-mtp to draft-mtp-adaptive
+        if (params.spec_adaptive && has_draft_mtp && !has_draft_mtp_adaptive) {
+            has_draft_mtp = false;
+            has_draft_mtp_adaptive = true;
+            SPC_INF("--spec-adaptive: using adaptive MTP draft depth (n_min_adaptive=%d, n_max=%d)\n",
+                    params.draft.n_min_adaptive, params.draft.n_max);
+        }
+
 
         bool has_ngram_cache   = (enabled_configs & (1u << COMMON_SPECULATIVE_TYPE_NGRAM_CACHE));
         bool has_ngram_simple  = (enabled_configs & (1u << COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE));

@@ -390,6 +390,8 @@ struct common_params_speculative_ngram_cache {
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
 
+    bool spec_adaptive = false; // enable adaptive MTP draft depth (overrides draft-mtp with draft-mtp-adaptive)
+
     double synth_len = -1.0;
     std::vector<double> synth_rates;
 
