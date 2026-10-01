@@ -4395,6 +4395,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
     add_opt(common_arg(
+        {"--spec-adaptive"}, "ON|OFF",
+        "enable adaptive MTP draft depth: automatically adjusts the number of speculative drafts "
+        "based on observed acceptance rate and context depth (default: off)\n"
+        "when enabled with --spec-type draft-mtp, uses draft-mtp-adaptive instead",
+        [](common_params & params, const std::string & value) {
+            params.speculative.spec_adaptive = (value == "on" || value == "1" || value == "true");
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_ADAPTIVE"));
+    add_opt(common_arg(
         {"--spec-draft-vocab-map"}, "FNAME",
         "draft-only vocabulary shortlist for the MTP draft head (llama-mtp-vocab-v1 map); the target is unaffected (default: full vocabulary)",
         [](common_params & params, const std::string & value) {
