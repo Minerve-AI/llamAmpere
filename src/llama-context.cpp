@@ -1,4 +1,5 @@
 #include "llama-context.h"
+#include "llama-mtp-chain-sample.h"
 #include "llama-sampler.h"
 
 // minimum number of output rows reserved at context creation (covers MTP verification widths)
