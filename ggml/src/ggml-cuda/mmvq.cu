@@ -1053,12 +1053,6 @@ static __global__ void mul_mat_vec_q(
             return vec_dot_iq3_xxs_q8_1_impl(grid_s, vbq, bq8, kbx_, iqs_);
         } else if constexpr (use_smem_grid && type == GGML_TYPE_IQ3_S) {
             return vec_dot_iq3_s_q8_1_impl(grid_s, vbq, bq8, kbx_, iqs_);
-        } else if constexpr (use_smem_grid && type == GGML_TYPE_IQ2_XXS) {
-            return vec_dot_iq2_xxs_q8_1_impl((const uint2 *) grid_s, vbq, bq8, kbx_, iqs_);
-        } else if constexpr (use_smem_grid && type == GGML_TYPE_IQ2_XS) {
-            return vec_dot_iq2_xs_q8_1_impl((const uint2 *) grid_s, vbq, bq8, kbx_, iqs_);
-        } else if constexpr (use_smem_grid && type == GGML_TYPE_IQ2_S) {
-            return vec_dot_iq2_s_q8_1_impl((const uint2 *) grid_s, vbq, bq8, kbx_, iqs_);
         } else {
             return vec_dot_q_cuda(vbq, bq8, kbx_, iqs_);
         }
@@ -1171,24 +1165,7 @@ static __global__ void mul_mat_vec_q(
         }
 #endif
 
-        if constexpr (reuse_weights && type == GGML_TYPE_PTQ1_0) {
-            // 4 lanes per 128-weight block (kqs = lane, VDR 1): the lane's y ints, scales and y sums are loaded
-            // once per k step and shared by every row below; each lane unpacks its share once and dots every column.
-            // Kept in its own branch: declaring the lane struct for the other reuse types put its 160-byte y array
-            // on the stack of the iq4_xs width-5 kernel (REG 179 -> 109 + 160 B spill, 3x slower).
-            ptq1_lane_y<ncols_dst> ptq1_y;
-            ptq1_0_lane_load_y<ncols_dst>(y + kby, kqs, stride_col_y, ptq1_y);
-#pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                float dots[ncols_dst];
-                vec_dot_ptq1_0_q8_1_lane<ncols_dst>(
-                    vx, kbx_offset + i*stride_row_x + kbx, kqs, ptq1_y, dots);
-#pragma unroll
-                for (int j = 0; j < ncols_dst; ++j) {
-                    tmp[j][i] += dots[j];
-                }
-            }
-        } else if constexpr (reuse_weights && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K || type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_Q5_0)) {
+        if constexpr (reuse_weights && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K || type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_Q5_0)) {
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
                 float dots[ncols_dst];
@@ -2337,8 +2314,6 @@ void ggml_cuda_mul_mat_vec_q(
     if (q8_hit) {
         qe->last_use = ++qc.tick;
     }
-
-        src0->type, ids ? src1->ne[2] : src1->ne[1]);
 
     ggml_cuda_pool_alloc<char> src1_q8_1_local(ctx.pool());
     char * src1_q8_1 = nullptr;
