@@ -1557,7 +1557,7 @@ struct ggml_backend_cuda_context {
     };
 
     struct {
-        std::vector<q8_cache_entry> entries;     // 2-entry LRU cache
+        q8_cache_entry entries[2];               // 2-entry LRU cache
         uint64_t                    tick = 0;    // monotonically increasing LRU counter
         std::vector<retired_buf>    retired;     // outgrown buffers, freed at teardown (captured graphs may still use them)
     } q8_cache;

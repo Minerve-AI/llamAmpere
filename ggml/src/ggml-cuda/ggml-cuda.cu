@@ -758,7 +758,8 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
         free_buf(r.ptr, r.dev);
     }
 
-    q8_cache.entries.clear();
+    q8_cache.entries[0] = {};
+    q8_cache.entries[1] = {};
     q8_cache.retired.clear();
     tq_rot_cache.ptr = nullptr;
     tq_rot_cache.retired.clear();
