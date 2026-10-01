@@ -3,9 +3,11 @@
 #include "llama.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <utility>
 
 #define LLAMA_NGRAM_MIN    1
 #define LLAMA_NGRAM_MAX    4
@@ -56,7 +58,45 @@ struct common_ngram_hash_function {
 };
 
 // token -> number of times token has been seen
-typedef std::unordered_map<llama_token, int32_t> common_ngram_cache_part;
+// Sorted vector for cache-friendly iteration and low memory overhead.
+// 64% of n-grams have only 1 follower, so a vector is much more efficient
+// than a hash map for the typical case.
+typedef std::vector<std::pair<llama_token, int32_t>> common_ngram_cache_part;
+
+// Binary search for a token in a sorted common_ngram_cache_part.
+// Returns a pointer to the count if found, nullptr otherwise.
+static inline int32_t * common_ngram_cache_part_find(common_ngram_cache_part & part, llama_token token) {
+    size_t n = part.size();
+    const std::pair<llama_token, int32_t> * base = part.data();
+    while (n > 1) {
+        const size_t half = n / 2;
+        base = base[half].first < token ? base + half : base;
+        n -= half;
+    }
+    if (n == 1 && base[0].first == token) {
+        return const_cast<int32_t *>(&base[0].second);
+    }
+    return nullptr;
+}
+
+// Insert a (token, count) pair into a sorted common_ngram_cache_part.
+// If the token already exists, increments its count.
+static inline void common_ngram_cache_part_emplace(common_ngram_cache_part & part, llama_token token, int32_t count) {
+    size_t n = part.size();
+    const std::pair<llama_token, int32_t> * base = part.data();
+    // Find insertion point
+    while (n > 1) {
+        const size_t half = n / 2;
+        base = base[half].first < token ? base + half : base;
+        n -= half;
+    }
+    size_t idx = base - part.data();
+    if (n == 1 && base[0].first == token) {
+        part[idx].second += count;
+        return;
+    }
+    part.insert(part.begin() + idx, {token, count});
+}
 
 // n-gram -> empirical distribution of following tokens
 typedef std::unordered_map<common_ngram, common_ngram_cache_part, common_ngram_hash_function> common_ngram_cache;
