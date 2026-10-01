@@ -1543,7 +1543,7 @@ struct ggml_backend_cuda_context {
     // collide into one decorated name and the linker rejects the object (LNK1179).
     struct retired_buf { char * ptr; size_t cap; int dev; };
 
-    struct {
+    struct q8_cache_entry {
         char *              ptr  = nullptr;      // raw device memory (not pool), grow-only
         size_t              cap  = 0;            // usable bytes
         int                 dev  = -1;           // device the buffer was allocated on
@@ -1552,8 +1552,14 @@ struct ggml_backend_cuda_context {
         uint64_t            epoch = 0;           // valid only within this graph eval
         size_t              size = 0;            // quantized bytes
         int64_t             ne10_padded = 0;     // layout keys
-        ggml_type           type = GGML_TYPE_COUNT;
-        std::vector<retired_buf> retired;        // outgrown buffers, freed at teardown (captured graphs may still use them)
+        bool                swizzle_iq4 = false; // layout key: swizzled IQ4_XS
+        uint64_t            last_use = 0;        // LRU tick
+    };
+
+    struct {
+        std::vector<q8_cache_entry> entries;     // 2-entry LRU cache
+        uint64_t                    tick = 0;    // monotonically increasing LRU counter
+        std::vector<retired_buf>    retired;     // outgrown buffers, freed at teardown (captured graphs may still use them)
     } q8_cache;
 
     // Same idea for the TQ activation pre-rotation (forward block WHT + q8_1 quantize): the MoE
