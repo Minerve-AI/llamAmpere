@@ -4048,39 +4048,6 @@ static int ggml_cuda_fuse_elem_chain(ggml_backend_cuda_context & ctx, const ggml
     return -1;
 }
 
-// [#46] ADD + RMS_NORM + MUL Q8_0 prefill: enabled with GGML_CUDA_ADD_RMS_Q8=1
-static bool ggml_cuda_add_rms_q8_enabled() {
-    static const bool enabled = [] {
-        const char * e = getenv("GGML_CUDA_ADD_RMS_Q8");
-        return e != nullptr && atoi(e) != 0;
-    }();
-    return enabled;
-}
-
-// Detect if the next MUL_MAT after the activation tensor will use the MMVQ path
-// (which requires Q8_0 quantized activations). Returns the weight type if so,
-// or GGML_TYPE_COUNT if not.
-static ggml_type ggml_cuda_add_rms_q8_consumer_type(const ggml_backend_cuda_context & ctx,
-                                                    const ggml_cgraph * cgraph,
-                                                    const int i_act) {
-    const ggml_tensor * act = cgraph->nodes[i_act];
-
-    for (int j = i_act + 1; j < cgraph->n_nodes; ++j) {
-        const ggml_tensor * node = cgraph->nodes[j];
-        if (node->op != GGML_OP_MUL_MAT || node->src[1] != act) {
-            continue;
-        }
-        const ggml_tensor * w = node->src[0];
-        // Only quantize if the weight is a K-quant type that uses MMVQ with Q8_1 activations
-        if (w->type == GGML_TYPE_Q4_K || w->type == GGML_TYPE_Q5_K ||
-            w->type == GGML_TYPE_Q6_K || w->type == GGML_TYPE_Q8_0) {
-            return w->type;
-        }
-        return GGML_TYPE_COUNT;
-    }
-    return GGML_TYPE_COUNT;
-}
-
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -4840,25 +4807,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     // Fused: ADD -> RMS_NORM -> MUL  (Qwen3Next residual pattern)
-    // With optional Q8_0 quantization fusion when the next consumer is MMVQ
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_ADD, GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
-        void *    q8_dst  = nullptr;
-        if (ggml_cuda_add_rms_q8_enabled()) {
-            const ggml_tensor * mul = cgraph->nodes[i + 2];
-            const ggml_type consumer = ggml_cuda_add_rms_q8_consumer_type(*cuda_ctx, cgraph, i + 2);
-            if (consumer != GGML_TYPE_COUNT) {
-                const int64_t ne10_padded = GGML_PAD(mul->ne[0], QK8_1);
-                const size_t  q8_bytes    = mul->ne[3]*mul->ne[2] * mul->ne[1]*ne10_padded * sizeof(block_q8_1)/QK8_1;
-                if (ggml_cuda_q8_cacheable(*cuda_ctx, q8_bytes)) {
-                    q8_dst  = ggml_cuda_q8_cache_claim(*cuda_ctx, mul, consumer, q8_bytes, ne10_padded);
-                }
-            }
-        }
-        if (q8_dst != nullptr) {
-            ggml_cuda_op_add_rms_norm_mul_q8(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], q8_dst);
-        } else {
-            ggml_cuda_op_add_rms_norm_mul_q8(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], nullptr);
-        }
+        ggml_cuda_op_add_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
         return 2;
     }
 

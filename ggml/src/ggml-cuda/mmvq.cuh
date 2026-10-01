@@ -36,10 +36,3 @@ void ggml_cuda_moe_cache_mmv_fused(
     int64_t slot_stride_bytes, int64_t n_hits, int64_t act_rows,
     float up_min, float up_max, float gate_min, float gate_max,
     cudaStream_t stream);
-
-// Q8_1 shared-quantize cache: check if a buffer of the given size can be cached
-bool ggml_cuda_q8_cacheable(const ggml_backend_cuda_context & ctx, size_t q8_bytes);
-
-// Q8_1 shared-quantize cache: claim a slot for the given tensor
-char * ggml_cuda_q8_cache_claim(ggml_backend_cuda_context & ctx, const ggml_tensor * src1, ggml_type type_src0,
-                                size_t q8_bytes, int64_t ne10_padded);
