@@ -2087,9 +2087,33 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 // TODO(mtp-chain): llama_set_mtp_chain() is provided by the llama API
                 // backport (llama-ext.h / llama-context.cpp); the chain decode depends
                 // on its in-graph chained sampling writing [token, prob] pairs to logits
+                int32_t   s_k     = 0;
+                float     s_temp  = 0.0f;
+                float     s_top_p = 1.0f;
+                float     s_min_p = 0.0f;
+                const bool sampled = chain_sampled && dp.sampling && dp.result_q && pq_params_ok(*dp.sampling) &&
+                        chain_sampled_params(*dp.sampling, s_k, s_temp, s_top_p, s_min_p);
                 llama_set_mtp_chain(ctx_dft, true);
+                if (sampled) {
+                    auto & rng = chain_rng[seq_one];
+                    if (!chain_rng_seeded[seq_one]) {
+                        const uint64_t seed = dp.sampling->seed == LLAMA_DEFAULT_SEED
+                            ? 0x1234567890abcdefULL
+                            : (uint64_t) dp.sampling->seed * 0x9e3779b97f4a7c15ULL;
+                        rng.seed(seed);
+                        chain_rng_seeded[seq_one] = 1;
+                    }
+                    chain_u.resize(n_chain);
+                    for (auto & x : chain_u) {
+                        x = (float) ((double) (rng() >> 40) * 0x1.0p-24); // 24-bit, exact in float and double
+                    }
+                    llama_set_mtp_chain_sampling(ctx_dft, s_k, s_temp, s_top_p, s_min_p, chain_u.data(), n_chain);
+                }
                 const int ret = llama_decode(ctx_dft, batch);
                 llama_set_mtp_chain(ctx_dft, false);
+                if (sampled) {
+                    llama_set_mtp_chain_sampling(ctx_dft, 0, 0.0f, 0.0f, 0.0f, nullptr, 0);
+                }
 
                 if (ret != 0) {
                     SPC_ERR("llama_decode(chain) returned %d\n", ret);
@@ -2102,6 +2126,54 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 const float * lp = llama_get_logits(ctx_dft);
 
                 auto & result = *dp.result;
+
+                if (sampled) {
+                    // rows of LLAMA_MTP_CHAIN_ROW(s_k) floats: re-derive every step on the host; the tokens and
+                    // the q rows handed to the verifier are the host's, so p/q stays exact whatever the GPU drew.
+                    // The first disagreement ends the draft: the host's token there is still a valid draw (its
+                    // prefix matched), but the chain's later steps were conditioned on the GPU's token.
+                    const int32_t W = LLAMA_MTP_CHAIN_ROW(s_k);
+                    const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_dft)));
+                    chain_st.rounds++;
+                    for (int j = 0; j < n_chain; ++j) {
+                        const float * row = lp + (size_t) W*j;
+                        std::vector<llama_token_data> q;
+                        const int32_t pick = llama_mtp_chain_rederive(row, s_k, s_temp, s_top_p, s_min_p, (double) chain_u[j], n_vocab, q);
+                        if (pick < 0) {
+                            chain_st.bad++;
+                            break;
+                        }
+                        if (q[0].p < params.p_min) {
+                            break;
+                        }
+                        const llama_token id = (llama_token) row[2 + pick];
+
+                        SPC_DBG(" - seq_id %d, sampled chain step %3d: %6d (q %8.3f, u %.6f)%s '%s'\n",
+                                seq_one, j, id, q[pick].p, chain_u[j], (int32_t) row[1] == pick ? "" : " [cut]",
+                                common_token_to_piece(ctx_dft, id).c_str());
+
+                        result.push_back(id);
+                        dp.result_q->push_back(std::move(q));
+                        chain_st.steps++;
+
+                        if ((int32_t) row[1] != pick) {
+                            chain_st.cut++;
+                            break;
+                        }
+                    }
+
+                    if ((chain_st.rounds & 1023) == 0) {
+                        chain_log_stats();
+                    }
+
+                    n_last[seq_one] = (int) result.size();
+                    if (!adaptive && dp.result->size() < (size_t) params.n_min) {
+                        dp.result->clear();
+                        dp.result_q->clear();
+                    }
+                    return;
+                }
+
                 for (int j = 0; j < n_chain; ++j) {
                     const llama_token id = (llama_token) lp[2*j + 0];
                     const float       p  =               lp[2*j + 1];

@@ -1,4 +1,5 @@
 #include "llama-graph.h"
+#include "llama-mtp-chain-sample.h"
 #include "llama-sampler.h"
 #include "llama-ext.h"
 

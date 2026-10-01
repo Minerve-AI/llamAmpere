@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-mtp-chain-sample.h"
 #include "llama-kv-cache.h"
 #include "llama-memory-recurrent.h"
 
