@@ -4397,8 +4397,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--spec-adaptive"}, "ON|OFF",
         "enable adaptive MTP draft depth: automatically adjusts the number of speculative drafts "
-        "based on observed acceptance rate and context depth (default: off)
-"
+        "based on observed acceptance rate and context depth (default: off)" 
         "when enabled with --spec-type draft-mtp, uses draft-mtp-adaptive instead",
         [](common_params & params, const std::string & value) {
             params.speculative.spec_adaptive = (value == "on" || value == "1" || value == "true");
