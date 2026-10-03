@@ -3,6 +3,9 @@
 #include "build-info.h"
 #include "chat.h"
 #include "common.h"
+
+// Bounded prefill budget setter (implemented in ggml-cuda/fattn.cu)
+extern void ggml_cuda_set_prefill_kv_budget_mib(size_t mib);
 #include "download.h"
 #include "json-schema-to-grammar.h"
 #include "json.h"
@@ -4403,6 +4406,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.spec_adaptive = (value == "on" || value == "1" || value == "true");
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_ADAPTIVE"));
+    add_opt(common_arg(
+        {"--prefill-kv-mib"}, "MiB",
+        "bounded prefill KV workspace budget in MiB (default: 1024, 0 = off/unbounded)\n"
+        "when the full f16 K+V copy exceeds this budget, KV heads are processed in groups",
+        [](common_params & params, const std::string & value) {
+            size_t mib = std::stoul(value);
+            ggml_cuda_set_prefill_kv_budget_mib(mib);
+            params.print_info = true;
+        }
+    ).set_env("LLAMA_ARG_PREFILL_KV_MIB").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--spec-draft-vocab-map"}, "FNAME",
         "draft-only vocabulary shortlist for the MTP draft head (llama-mtp-vocab-v1 map); the target is unaffected (default: full vocabulary)",
