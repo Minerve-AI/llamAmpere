@@ -4897,6 +4897,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
+// [#87] forward declarations: defined below, called from ggml_cuda_graph_evaluate_and_capture
+static void ggml_cuda_gdn_state_read_plan(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph,
+                                          std::vector<uint8_t> & skip);
+static void ggml_cuda_gdn_state_read_finish(ggml_backend_cuda_context * cuda_ctx);
+
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, uint64_t graph_key) {
     bool graph_evaluated_or_captured = false;
 
