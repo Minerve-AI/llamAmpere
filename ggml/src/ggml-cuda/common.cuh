@@ -1578,6 +1578,18 @@ struct ggml_backend_cuda_context {
 
     uint64_t graph_epoch = 1;
 
+    // GDN state read overlap: when a GDN op's state input (src[5]) comes from a GET_ROWS over
+    // a persistent cache, the plan marks the GET_ROWS for skipping and records the source
+    // pointer + row indices so the GDN kernel can read directly from the cache.
+    struct gdn_state_read_entry {
+        const ggml_tensor * gdn        = nullptr;  // the GDN tensor this entry belongs to
+        const float *       base       = nullptr;  // source cache base pointer
+        const int32_t *     rows       = nullptr;  // per-sequence row indices (device)
+        int64_t             row_stride = 0;        // floats between consecutive rows
+        bool                used       = false;    // set true when the kernel consumed it
+    };
+    std::vector<gdn_state_read_entry> gdn_state_reads;
+
     // Fusion hit counters. Read through ggml_backend_cuda_fusion_count(); test-backend-ops uses
     // them to check that a fusion actually fired, not only that the fused result is right.
     struct {
