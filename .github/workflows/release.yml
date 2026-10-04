@@ -35,6 +35,7 @@ jobs:
       - name: Clone
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.tag }}
           fetch-depth: 0
 
       - name: Install CUDA Toolkit 12.4
