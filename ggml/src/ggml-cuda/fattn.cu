@@ -1003,7 +1003,7 @@ static size_t ggml_cuda_fattn_prefill_budget() {
     return g_prefill_kv_budget_mib << 20;
 }
 
-static ggml_cuda_fattn_bounded_prefill_plan ggml_cuda_fattn_bounded_prefill_plan(
+static ggml_cuda_fattn_bounded_prefill_plan ggml_cuda_fattn_bounded_prefill_make_plan(
         const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V) {
     ggml_cuda_fattn_bounded_prefill_plan p;
 
@@ -1090,7 +1090,7 @@ static bool ggml_cuda_flash_attn_ext_bounded_prefill_applies(const ggml_tensor *
     const ggml_tensor * Q = dst->src[0];
     const ggml_tensor * K = dst->src[1];
     const ggml_tensor * V = dst->src[2];
-    auto p = ggml_cuda_fattn_bounded_prefill_plan(Q, K, V);
+    auto p = ggml_cuda_fattn_bounded_prefill_make_plan(Q, K, V);
     return p.heads > 0;
 }
 
@@ -1218,7 +1218,7 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
 
     // Bounded prefill: if the plan applies, use its (smaller) reservation
     if (kernel == BEST_FATTN_KERNEL_MMA_F16) {
-        auto plan = ggml_cuda_fattn_bounded_prefill_plan(Q, K, V);
+        auto plan = ggml_cuda_fattn_bounded_prefill_make_plan(Q, K, V);
         if (plan.heads > 0 && plan.reserve < alloc) {
             alloc = plan.reserve;
         }
@@ -1311,7 +1311,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 const ggml_tensor * Q_d = dst->src[0];
                 const ggml_tensor * K_d = dst->src[1];
                 const ggml_tensor * V_d = dst->src[2];
-                auto plan = ggml_cuda_fattn_bounded_prefill_plan(Q_d, K_d, V_d);
+                auto plan = ggml_cuda_fattn_bounded_prefill_make_plan(Q_d, K_d, V_d);
                 if (plan.heads > 0 && plan.heads < plan.n_head_kv) {
                     ggml_cuda_fattn_path_note("bounded_prefill", dst, -1);
                     ggml_cuda_flash_attn_ext_bounded_prefill(ctx, dst, plan);
