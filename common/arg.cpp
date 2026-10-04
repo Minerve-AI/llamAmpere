@@ -4411,9 +4411,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "bounded prefill KV workspace budget in MiB (default: 1024, 0 = off/unbounded)\n"
         "when the full f16 K+V copy exceeds this budget, KV heads are processed in groups",
         [](common_params & params, const std::string & value) {
+            (void) params;
             size_t mib = std::stoul(value);
             ggml_cuda_set_prefill_kv_budget_mib(mib);
-            params.print_info = true;
         }
     ).set_env("LLAMA_ARG_PREFILL_KV_MIB").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
