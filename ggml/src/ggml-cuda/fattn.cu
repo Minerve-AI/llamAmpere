@@ -971,214 +971,243 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 // ============================================================================
 // Bounded f16 prefill (ported from JakeATX/llamAmpere PR #22/#29)
 //
-// Splits the KV cache into groups of whole KV heads, converts each group to
-// f16 in a bounded workspace, runs the f16 MMA kernel per group, then scatters
-// the group output into dst. Reduces peak workspace from the full f16 K+V copy
-// to the budget set by --prefill-kv-mib (default 1024 MiB = unbounded behavior).
+// GGML_CUDA_PREFILL_KV_MIB=<MiB> sets the workspace budget (default 256 MiB,
+// 0 or "off" = disabled). When the full f16 K+V copy exceeds the budget, KV
+// heads are processed in groups: each group is converted to f16 in a bounded
+// workspace, the f16 MMA kernel runs per group, then the output is scattered
+// into dst. Reduces peak VRAM from the full f16 K+V copy to the budget.
 // ============================================================================
 
-struct ggml_cuda_fattn_bounded_prefill_plan {
-    int    heads      = 0;     // KV heads per group; 0 = plan does not apply
-    int    n_head_kv  = 0;
-    int    gqa        = 0;     // query heads per KV head
-    size_t kv_bytes   = 0;     // f16 bytes of one group's K: heads * n_kv * D * 2
-    size_t out_bytes  = 0;     // f32 bytes of one group's output: heads * gqa * n_q * D * 4
-    size_t offset     = 0;     // workspace offset behind dst->data
-    size_t workspace  = 0;     // 2 * kv_bytes + out_bytes
-    size_t reserve    = 0;     // bytes reserved behind dst
-    size_t budget     = 0;     // budget in bytes
+struct ggml_cuda_fattn_bounded_plan {
+    int    heads       = 0;    // KV heads per group; 0 = plan does not apply
+    int    n_head_kv   = 0;
+    int    gqa         = 0;    // query heads per KV head
+    size_t kv_bytes    = 0;    // f16 bytes of one group's K: heads * n_kv * D * 2
+    size_t out_bytes   = 0;    // f32 bytes of one group's output: heads * gqa * n_q * D * 4
+    size_t offset      = 0;    // workspace offset behind dst->data
+    size_t workspace   = 0;    // 2 * kv_bytes + out_bytes
+    size_t reserve     = 0;    // bytes reserved behind dst: max(workspace, budget)
+    size_t budget      = 0;    // budget in bytes
     size_t floor_bytes = 0;    // one KV head's f16 K+V plus its GQA group's output
-    size_t full       = 0;     // the full f16 K+V copies (unbounded)
-    bool   floor_used = false;
+    size_t full        = 0;    // the full f16 K+V copies (unbounded)
+    bool   floor_used  = false;
 };
 
-// Global budget set by --prefill-kv-mib CLI arg (default 1024 MiB)
-static size_t g_prefill_kv_budget_mib = 1024;
-
-void ggml_cuda_set_prefill_kv_budget_mib(size_t mib) {
-    g_prefill_kv_budget_mib = mib;
-}
-
 static size_t ggml_cuda_fattn_prefill_budget() {
-    return g_prefill_kv_budget_mib << 20;
+    static const size_t budget = [] {
+        constexpr size_t default_mib = 256;
+        const char * s = getenv("GGML_CUDA_PREFILL_KV_MIB");
+        if (s == nullptr || *s == '\0') return default_mib << 20;
+        if (strcmp(s, "off") == 0) return size_t(0);
+        size_t n = 0;
+        for (const char * c = s; *c; ++c) {
+            if (*c < '0' || *c > '9' || n > 16384) return size_t(0);
+            n = n*10 + size_t(*c - '0');
+        }
+        return n << 20;
+    }();
+    return budget;
 }
 
-static ggml_cuda_fattn_bounded_prefill_plan ggml_cuda_fattn_bounded_prefill_make_plan(
-        const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V) {
-    ggml_cuda_fattn_bounded_prefill_plan p;
+static ggml_cuda_fattn_bounded_plan ggml_cuda_fattn_bounded_prefill_plan(int device, const ggml_tensor * dst) {
+    ggml_cuda_fattn_bounded_plan p;
 
-    // TODO: bounded prefill execution requires redirecting kernel K/V pointers
-    // to the workspace. Currently disabled until that is implemented.
-    // The --prefill-kv-mib CLI arg is parsed and stored but has no effect yet.
-    (void) Q; (void) K; (void) V;
-    return p; // heads = 0 → plan does not apply
+    const size_t budget = ggml_cuda_fattn_prefill_budget();
+    if (budget == 0) return p;
 
-    const int64_t D      = Q->ne[0];
-    const int64_t n_q    = Q->ne[1];
-    const int64_t n_head = Q->ne[2];
-    const int64_t n_kv   = K->ne[1];
-    const int64_t n_head_kv = K->ne[2];
+    GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
 
-    // Eligibility: Ampere, D=256, prefill (n_q > 8), GQA, supported KV types
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    if (Q == nullptr || K == nullptr || V == nullptr) return p;
+
+    // Ampere only
+    const int cc = ggml_cuda_info().devices[device].cc;
     if (cc < 80 || cc > 89) return p;
-    if (D != 256) return p;
-    if (n_q <= 8) return p;
-    if (n_head_kv < 2) return p;
-    if (n_head % n_head_kv != 0) return p;
 
-    const bool kv_ok = (K->type == GGML_TYPE_Q8_0) ||
-                       (K->type == GGML_TYPE_TURBO2_0) ||
-                       (K->type == GGML_TYPE_TURBO3_0) ||
-                       (K->type == GGML_TYPE_TURBO4_0) ||
-                       (K->type == GGML_TYPE_F16);
-    if (!kv_ok) return p;
-    if (K->type != V->type) return p;
+    // D=256, F32 Q, prefill (n_q > 8), batch 1
+    if (Q->type != GGML_TYPE_F32 || Q->ne[0] != 256 || K->ne[0] != 256 || V->ne[0] != 256) return p;
+    if (Q->ne[1] <= 8 || Q->ne[3] != 1) return p;
+    if (K->ne[1] < 1 || K->ne[1] != V->ne[1]) return p;
 
-    // No ALiBi, no per-head mask
-    if (Q->ne[3] != 1) return p;
+    // GQA: at least 2 KV heads, integral ratio, matching K/V head counts
+    if (K->ne[2] < 2 || K->ne[2] != V->ne[2] || K->ne[2] > Q->ne[2] ||
+        Q->ne[2] % K->ne[2] != 0 || K->ne[3] != 1 || V->ne[3] != 1) return p;
 
-    p.budget    = ggml_cuda_fattn_prefill_budget();
-    if (p.budget == 0) return p; // disabled
+    // Contiguous F32 output
+    if (dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst)) return p;
 
-    p.n_head_kv = (int) n_head_kv;
-    p.gqa       = (int) (n_head / n_head_kv);
+    // K != V (no MLA / shared views)
+    if (K == V) return p;
 
-    // Full f16 K+V copy size (what unbounded reserves)
-    p.full = 2 * (size_t) n_kv * (size_t) n_head_kv * (size_t) D * 2;
-
-    // If full copy fits in budget, use unbounded route (all heads at once)
-    if (p.full <= p.budget) {
-        p.heads = p.n_head_kv;
-        p.kv_bytes  = (size_t) p.heads * (size_t) n_kv * (size_t) D * 2;
-        p.out_bytes = (size_t) p.heads * (size_t) p.gqa * (size_t) n_q * (size_t) D * 4;
-        p.workspace = 2 * p.kv_bytes + p.out_bytes;
-        p.reserve   = p.workspace;
-        return p;
+    // Supported quantized KV types with a strided f16 converter
+    for (const ggml_tensor * t : {K, V}) {
+        bool ok = false;
+        switch (t->type) {
+            case GGML_TYPE_Q8_0:
+            case GGML_TYPE_TURBO2_0:
+            case GGML_TYPE_TURBO3_0:
+            case GGML_TYPE_TURBO4_0:
+                ok = true; break;
+            default: break;
+        }
+        if (!ok) return p;
+        const size_t ts = ggml_type_size(t->type);
+        if (t->nb[0] != ts || t->nb[1] % ts != 0 || t->nb[2] % ts != 0 || t->nb[3] % ts != 0) return p;
     }
 
-    // Bounded: determine how many KV heads fit per group
-    // Per-head cost: f16 K + f16 V + f32 output for gqa query heads
-    const size_t per_head_kv  = (size_t) n_kv * (size_t) D * 2;
-    const size_t per_head_out = (size_t) p.gqa * (size_t) n_q * (size_t) D * 4;
-    const size_t per_head_total = 2 * per_head_kv + per_head_out;
+    // Must use the MMA_F16 kernel (the only consumer of the per-group launch)
+    if (ggml_cuda_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_MMA_F16) return p;
 
-    // Floor: at least 1 KV head must fit
-    p.floor_bytes = per_head_total;
-    if (p.budget < p.floor_bytes) {
-        p.floor_used = true;
-        p.budget = p.floor_bytes;
-    }
+    const int64_t n_head_kv  = K->ne[2];
+    const int64_t gqa        = Q->ne[2] / n_head_kv;
+    const size_t  kv_per_head  = size_t(K->ne[1]) * 256 * sizeof(half);
+    const size_t  out_per_head = size_t(Q->ne[1]) * size_t(gqa) * 256 * sizeof(float);
 
-    // Number of heads per group
-    int h = (int) (p.budget / per_head_total);
-    if (h < 1) h = 1;
-    if (h > p.n_head_kv) h = p.n_head_kv;
-    // Must divide n_head_kv evenly
-    while (h > 1 && p.n_head_kv % h != 0) h--;
+    p.budget = budget;
+    p.full   = 2 * kv_per_head * size_t(n_head_kv);
+    p.floor_bytes = 2 * kv_per_head + out_per_head;
 
-    p.heads     = h;
-    p.kv_bytes  = (size_t) h * (size_t) n_kv * (size_t) D * 2;
-    p.out_bytes = (size_t) h * (size_t) p.gqa * (size_t) n_q * (size_t) D * 4;
+    // Full copies fit budget, or one group >= full copies: unchanged route
+    if (p.full <= budget || p.floor_bytes >= p.full) return p;
+
+    size_t heads = budget / p.floor_bytes;
+    if (heads == 0) { heads = 1; p.floor_used = true; }
+    heads = std::min(heads, size_t(n_head_kv));
+
+    p.heads     = int(heads);
+    p.n_head_kv = int(n_head_kv);
+    p.gqa       = int(gqa);
+    p.kv_bytes  = kv_per_head * heads;
+    p.out_bytes = out_per_head * heads;
+    p.offset    = GGML_PAD(ggml_nbytes(dst), 128);
     p.workspace = 2 * p.kv_bytes + p.out_bytes;
-    p.reserve   = std::max(p.workspace, p.budget);
+    p.reserve   = std::max(p.workspace, budget);
 
+    if (p.floor_used) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            GGML_LOG_WARN("fattn bounded prefill: budget %zu MiB is below the one-group floor at n_kv=%lld "
+                          "(%.1f MiB); using 1 of %lld KV heads per group\n",
+                          budget >> 20, (long long) K->ne[1], p.floor_bytes / 1048576.0, (long long) n_head_kv);
+        }
+    }
     return p;
 }
 
-static bool ggml_cuda_flash_attn_ext_bounded_prefill_applies(const ggml_tensor * dst) {
-    const ggml_tensor * Q = dst->src[0];
-    const ggml_tensor * K = dst->src[1];
-    const ggml_tensor * V = dst->src[2];
-    auto p = ggml_cuda_fattn_bounded_prefill_make_plan(Q, K, V);
-    return p.heads > 0;
-}
-
 // Scatter one group's contiguous output [D, heads*gqa, n_q] into dst [D, n_head, n_q]
-// at query head index `first_head`.
 static __global__ void ggml_cuda_fattn_bounded_prefill_scatter(
-        const float * __restrict__ src, float * __restrict__ dst,
-        int64_t n, int group_heads, int first_head, int n_head_total) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-
-    // src layout: [D, group_heads, n_q] contiguous
-    // dst layout: [D, n_head_total, n_q]
-    // We need to map: for each element in src at position (d, h_local, q),
-    // write to dst at (d, first_head + h_local, q)
-
-    const int64_t n_q = n / (256 * group_heads); // D=256
-    const int64_t q = idx % n_q;
-    const int64_t h_local = (idx / n_q) % group_heads;
-    const int64_t d = idx / (n_q * group_heads);
-
-    const int64_t h_global = first_head + h_local;
-    dst[d * n_head_total * n_q + h_global * n_q + q] = src[idx];
+        const float * src, float * dst, const int64_t n, const int group_heads,
+        const int first, const int all_heads) {
+    const int64_t i = int64_t(blockIdx.x)*blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int64_t row = i / 256;
+    const int64_t tok = row / group_heads;
+    const int64_t h   = row % group_heads;
+    dst[(tok*all_heads + first + h)*256 + i % 256] = src[i];
 }
 
 static void ggml_cuda_flash_attn_ext_bounded_prefill(
-        ggml_backend_cuda_context & ctx, ggml_tensor * dst,
-        const ggml_cuda_fattn_bounded_prefill_plan & p) {
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_cuda_fattn_bounded_plan & p) {
     const ggml_tensor * Q = dst->src[0];
     const ggml_tensor * K = dst->src[1];
     const ggml_tensor * V = dst->src[2];
+    cudaStream_t stream = ctx.stream();
 
-    const int64_t D     = Q->ne[0];
-    const int64_t n_q   = Q->ne[1];
-    const int64_t n_head = Q->ne[2];
+    // Workspace: use the reserved region behind dst if available, else pool
+    ggml_cuda_pool_alloc<char> ws_pool(ctx.pool());
+    char * ws = nullptr;
+    const bool reserved = dst->buffer != nullptr && dst->view_src == nullptr &&
+        (uintptr_t) dst->data % 128 == 0 &&
+        p.offset + p.workspace <= ggml_backend_buffer_get_alloc_size(dst->buffer, dst);
+    if (reserved) {
+        ws = (char *) dst->data + p.offset;
+    } else {
+        ws = ws_pool.alloc(p.workspace);
+    }
 
-    cudaStream_t stream = 0; // default stream (same as rest of fattn)
+    half  * K_ws = (half  *)  ws;
+    half  * V_ws = (half  *) (ws + p.kv_bytes);
+    float * O_ws = (float *) (ws + 2*p.kv_bytes);
 
-    // Workspace starts behind dst->data, offset by ggml_nbytes(dst) padded to 128
-    size_t dst_bytes = ggml_nbytes(dst);
-    size_t ws_offset = (dst_bytes + 127) & ~size_t(127);
-    char * ws_base = (char *) dst->data + ws_offset;
+    // Process groups in ascending KV-head order
+    for (int first = 0; first < p.n_head_kv; first += p.heads) {
+        const int heads = std::min(p.heads, p.n_head_kv - first);
 
-    const int n_groups = p.n_head_kv / p.heads;
-
-    for (int g = 0; g < n_groups; ++g) {
-        const int first_head = g * p.heads;
-
-        // Workspace layout: [f16 K | f16 V | f32 output]
-        auto * K_ws = (void *) ws_base;
-        auto * V_ws = (void *) (ws_base + p.kv_bytes);
-        auto * O_ws = (void *) (ws_base + 2 * p.kv_bytes);
-
-        // Convert K slice [D, n_kv, heads] to f16
-        {
-            const void * K_src = (const char *) K->data + first_head * K->nb[2];
-            // Copy K group to f16 workspace (K is already F16)
-            size_t k_bytes = p.heads * K->ne[1] * K->ne[0] * sizeof(half);
-            CUDA_CHECK(cudaMemcpyAsync(K_ws, K_src, k_bytes, cudaMemcpyDeviceToDevice, stream));
-        }
-        // Convert V slice [D, n_kv, heads] to f16
-        {
-            const void * V_src = (const char *) V->data + first_head * V->nb[2];
-            // Copy V group to f16 workspace (V is already F16)
-            size_t v_bytes = p.heads * V->ne[1] * V->ne[0] * sizeof(half);
-            CUDA_CHECK(cudaMemcpyAsync(V_ws, V_src, v_bytes, cudaMemcpyDeviceToDevice, stream));
-        }
-
-        // Build a temporary view of dst with only this group's heads
-        // We call the f16 MMA kernel with modified head count
+        ggml_tensor q = *Q;
+        ggml_tensor k = *K;
+        ggml_tensor v = *V;
         ggml_tensor out = *dst;
-        out.data = O_ws;
-        out.ne[2] = p.heads * p.gqa; // only this group's query heads
 
-        // Call the f16 MMA kernel
+        // Q: slice to this group's query heads
+        q.ne[2] = int64_t(heads) * p.gqa;
+        q.data  = (char *) Q->data + size_t(first) * p.gqa * Q->nb[2];
+
+        // Convert K group to contiguous f16 in workspace
+        {
+            const size_t ts = ggml_type_size(k.type);
+            to_fp16_nc_cuda_t to_fp16 = ggml_get_to_fp16_nc_cuda(k.type);
+            GGML_ASSERT(to_fp16 != nullptr);
+            to_fp16((const char *) k.data + size_t(first) * k.nb[2], K_ws,
+                k.ne[0], k.ne[1], heads, 1,
+                int64_t(k.nb[1] / ts), int64_t(k.nb[2] / ts), int64_t(k.nb[3] / ts), stream);
+            CUDA_CHECK(cudaGetLastError());
+
+            k.type  = GGML_TYPE_F16;
+            k.ne[2] = heads;
+            k.nb[0] = sizeof(half);
+            for (int d = 1; d < GGML_MAX_DIMS; ++d) k.nb[d] = k.nb[d-1] * k.ne[d-1];
+            k.data      = K_ws;
+            k.buffer    = nullptr;
+            k.view_src  = nullptr;
+            k.view_offs = 0;
+        }
+
+        // Convert V group to contiguous f16 in workspace
+        {
+            const size_t ts = ggml_type_size(v.type);
+            to_fp16_nc_cuda_t to_fp16 = ggml_get_to_fp16_nc_cuda(v.type);
+            GGML_ASSERT(to_fp16 != nullptr);
+            to_fp16((const char *) v.data + size_t(first) * v.nb[2], V_ws,
+                v.ne[0], v.ne[1], heads, 1,
+                int64_t(v.nb[1] / ts), int64_t(v.nb[2] / ts), int64_t(v.nb[3] / ts), stream);
+            CUDA_CHECK(cudaGetLastError());
+
+            v.type  = GGML_TYPE_F16;
+            v.ne[2] = heads;
+            v.nb[0] = sizeof(half);
+            for (int d = 1; d < GGML_MAX_DIMS; ++d) v.nb[d] = v.nb[d-1] * v.ne[d-1];
+            v.data      = V_ws;
+            v.buffer    = nullptr;
+            v.view_src  = nullptr;
+            v.view_offs = 0;
+        }
+
+        // Set up output tensor pointing to workspace
+        out.src[0] = &q;
+        out.src[1] = &k;
+        out.src[2] = &v;
+        out.ne[1]  = q.ne[2];
+        out.nb[0]  = sizeof(float);
+        for (int d = 1; d < GGML_MAX_DIMS; ++d) out.nb[d] = out.nb[d-1] * out.ne[d-1];
+        out.data      = O_ws;
+        out.buffer    = nullptr;
+        out.view_src  = nullptr;
+        out.view_offs = 0;
+
+        // Run the f16 MMA kernel (K/V are already f16, so launch_fattn skips conversion)
         ggml_cuda_flash_attn_ext_mma_f16(ctx, &out);
 
-        // Scatter the group output into dst
-        const int64_t n = p.heads * p.gqa * n_q * D;
+        // Scatter group output into dst
+        const int64_t n = ggml_nelements(&out);
+        dim3 grid((unsigned int)((n + 255) / 256));
         dim3 block(256);
-        dim3 grid((unsigned int) ((n + 255) / 256));
         ggml_cuda_fattn_bounded_prefill_scatter<<<grid, block, 0, stream>>>(
-            (const float *) O_ws, (float *) dst->data,
-            n, p.heads * p.gqa, first_head * p.gqa, (int) n_head);
+            O_ws, (float *) dst->data, n, heads * p.gqa, first * p.gqa, (int) Q->ne[2]);
         CUDA_CHECK(cudaGetLastError());
     }
 }
-
 
 size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst) {
     GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
@@ -1218,9 +1247,12 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
 
     // Bounded prefill: if the plan applies, use its (smaller) reservation
     if (kernel == BEST_FATTN_KERNEL_MMA_F16) {
-        auto plan = ggml_cuda_fattn_bounded_prefill_make_plan(Q, K, V);
-        if (plan.heads > 0 && plan.reserve < alloc) {
-            alloc = plan.reserve;
+        auto plan = ggml_cuda_fattn_bounded_prefill_plan(device, dst);
+        if (plan.heads > 0) {
+            size_t bounded_alloc = plan.offset + plan.reserve;
+            if (bounded_alloc < alloc) {
+                alloc = bounded_alloc;
+            }
         }
     }
 
@@ -1311,9 +1343,9 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 const ggml_tensor * Q_d = dst->src[0];
                 const ggml_tensor * K_d = dst->src[1];
                 const ggml_tensor * V_d = dst->src[2];
-                auto plan = ggml_cuda_fattn_bounded_prefill_make_plan(Q_d, K_d, V_d);
-                if (plan.heads > 0 && plan.heads < plan.n_head_kv) {
-                    ggml_cuda_fattn_path_note("bounded_prefill", dst, -1);
+                auto plan = ggml_cuda_fattn_bounded_prefill_plan(device, dst);
+                if (plan.heads > 0) {
+                    ggml_cuda_fattn_path_note("mma_f16_bounded", dst, 0);
                     ggml_cuda_flash_attn_ext_bounded_prefill(ctx, dst, plan);
                     break;
                 }
