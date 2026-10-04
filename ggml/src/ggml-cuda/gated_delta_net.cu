@@ -822,10 +822,12 @@ static void ggml_cuda_op_gated_delta_net_impl(
     const float * state_src_base = nullptr;
     for (auto & e : ctx.gdn_state_reads) {
         if (e.gdn == dst) {
+            GGML_ASSERT(!e.used);
             state_src_base = e.base;
             state_src.rows = e.rows;
             state_src.row_stride = e.row_stride;
             e.used = true;
+            ctx.fusion_stats.gdn_state_read++;
             break;
         }
     }

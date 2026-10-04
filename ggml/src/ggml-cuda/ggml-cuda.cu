@@ -6628,6 +6628,9 @@ int64_t ggml_backend_cuda_fusion_count(ggml_backend_t backend, const char * name
     if (strcmp(name, "fused_mul") == 0) {
         return ctx->fusion_stats.fused_mul;
     }
+    if (strcmp(name, "gdn_state_read") == 0) {
+        return ctx->fusion_stats.gdn_state_read;
+    }
     return -1;
 }
 

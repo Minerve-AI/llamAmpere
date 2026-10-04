@@ -1597,6 +1597,7 @@ struct ggml_backend_cuda_context {
         int64_t q8_cache_hits = 0;   // mmvq shared-quantize cache hits
         int64_t fused_add     = 0;   // tuned multi-ADD runs (ggml_cuda_op_fused_add)
         int64_t fused_mul     = 0;   // tuned multi-MUL runs (ggml_cuda_op_fused_mul)
+        int64_t gdn_state_read = 0;  // gated_delta_net launches that read the state through s_copy (#87)
     } fusion_stats;
 
 #ifdef USE_CUDA_GRAPH
