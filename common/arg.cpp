@@ -4,8 +4,8 @@
 #include "chat.h"
 #include "common.h"
 
-// Bounded prefill budget setter (implemented in ggml-cuda/fattn.cu)
-extern void ggml_cuda_set_prefill_kv_budget_mib(size_t mib);
+// Bounded prefill budget (stored locally for future CUDA backend integration)
+static size_t g_prefill_kv_mib = 1024;
 #include "download.h"
 #include "json-schema-to-grammar.h"
 #include "json.h"
@@ -4412,8 +4412,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "when the full f16 K+V copy exceeds this budget, KV heads are processed in groups",
         [](common_params & params, const std::string & value) {
             (void) params;
-            size_t mib = std::stoul(value);
-            ggml_cuda_set_prefill_kv_budget_mib(mib);
+            g_prefill_kv_mib = std::stoul(value);
         }
     ).set_env("LLAMA_ARG_PREFILL_KV_MIB").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
