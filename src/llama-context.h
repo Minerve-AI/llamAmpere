@@ -274,6 +274,10 @@ public:
     // the last `n_hot` entries become adaptive slots, see llama_draft_vocab_observe/refresh
     void init_draft_vocab(const char * path, int32_t n_hot);
 
+    // auto-derive the shortlist from tokenizer.ggml.scores in the GGUF (no external file)
+    // sorts token IDs by BPE score descending, keeps the top N (default 32768, env LLAMA_DRAFT_VOCAB_SIZE)
+    void init_draft_vocab_auto(int32_t n_hot);
+
     // adaptive draft-vocabulary tail (request granularity, must not race with a graph)
     void    draft_vocab_observe(const llama_token * toks, size_t n);
     int32_t draft_vocab_refresh();

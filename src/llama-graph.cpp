@@ -4416,6 +4416,34 @@ ggml_tensor * llm_graph_context::build_draft_vocab_logits(
     return logits;
 }
 
+ggml_tensor * llm_graph_context::build_draft_vocab_logits_chain(
+        ggml_tensor * head_w,
+        ggml_tensor * head_s,
+        ggml_tensor * cur) const {
+    if (draft_vocab_ids == nullptr || head_w == nullptr) {
+        return nullptr;
+    }
+    if (hadamard_rotations && hadamard_rotations->count(head_w)) {
+        return nullptr;
+    }
+    if ((loras && !loras->empty()) || (head_s && ggml_nelements(head_s) != 1)) {
+        return nullptr;
+    }
+    if (draft_vocab_ids->ne[0] >= head_w->ne[1] || !draft_vocab_direct(head_w)) {
+        return nullptr;
+    }
+    GGML_ASSERT(cur->ne[1] == 1);
+
+    const int64_t n_sel = draft_vocab_ids->ne[0];
+
+    ggml_tensor * rows = ggml_reshape_3d(ctx0, head_w, head_w->ne[0], 1, head_w->ne[1]);
+    ggml_tensor * logits = ggml_reshape_2d(ctx0, ggml_mul_mat_id(ctx0, rows, cur, draft_vocab_ids), n_sel, 1);
+    if (head_s) {
+        logits = ggml_mul(ctx0, logits, head_s);
+    }
+    return logits;
+}
+
 int32_t llama_relative_position_bucket(llama_pos x, llama_pos y, uint64_t n_buckets, bool bidirectional) {
     // TODO move to hparams if a T5 variant appears that uses a different value
     const int64_t max_distance = 128;
