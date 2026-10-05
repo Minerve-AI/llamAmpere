@@ -63,10 +63,6 @@ gated_delta_net_cuda(const T_in * q,
     // (seq,head)'s slot-0 storage either way. `state` (unoffset) is kept around separately so
     // the trailing final-state block (always S_v*S_v-shaped, at a fixed offset past all K
     // ingredient slots) can be addressed too.
-    const int64_t state_in_offset = (state_src.rows != nullptr
-        ? (int64_t) state_src.rows[sequence] * state_src.row_stride + h_idx * S_v * S_v
-        : sequence * H * S_v * S_v + h_idx * S_v * S_v);
-    curr_state += state_in_offset + col * S_v;
     attn_data += (sequence * n_tokens * H + h_idx) * S_v;
 
     float * state_out;
@@ -82,7 +78,12 @@ gated_delta_net_cuda(const T_in * q,
     float         s_shard[rows_per_lane];
     // state is stored transposed: M[col][i] = S[i][col], row col is contiguous
 
+    // [#87] PDL sync before reading rows[sequence]: ensures the preceding kernel that wrote
+    // the rows table has completed. Without this, the offset can be garbage under PDL.
     ggml_cuda_pdl_sync();
+    curr_state += (state_src.rows != nullptr
+        ? (int64_t) state_src.rows[sequence] * state_src.row_stride + h_idx * S_v * S_v
+        : sequence * H * S_v * S_v + h_idx * S_v * S_v) + col * S_v;
 #pragma unroll
     for (int r = 0; r < rows_per_lane; r++) {
         const int i = r * warp_size + lane;
