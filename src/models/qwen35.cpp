@@ -802,8 +802,13 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
                 return env != nullptr ? atoll(env) : 32768;
             }();
 
-            ggml_tensor * logits_j;
-            if (n_sub_env > 0 && n_sub_env < head_w2->ne[1] &&
+            // draft vocab shortlist replaces the leading-rows cut: logit positions are
+            // then map rows, translated back to token ids through draft_vocab_ids
+            ggml_tensor * id_map   = nullptr;
+            ggml_tensor * logits_j = build_draft_vocab_logits_chain(head_w2, head_s2, h_next_j);
+            if (logits_j != nullptr) {
+                id_map = draft_vocab_ids;
+            } else if (n_sub_env > 0 && n_sub_env < head_w2->ne[1] &&
                     !(hadamard_rotations && hadamard_rotations->count(head_w2))) {
                 ggml_tensor * head_sub = ggml_view_2d(ctx0, head_w2,
                         head_w2->ne[0], n_sub_env, head_w2->nb[1], 0);
@@ -815,7 +820,13 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
                 logits_j = build_lora_mm(head_w2, h_next_j, head_s2);
             }
 
-            ggml_tensor * id_j = ggml_argmax(ctx0, logits_j);
+            ggml_tensor * id_j;
+            if (id_map) {
+                ggml_tensor * pos_j = ggml_argmax(ctx0, logits_j);
+                id_j = ggml_reshape_1d(ctx0, ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, id_map, 1, id_map->ne[0]), pos_j), 1);
+            } else {
+                id_j = ggml_argmax(ctx0, logits_j);
+            }
             ggml_tensor * probs_j = ggml_soft_max(ctx0, logits_j);
             ggml_tensor * p_j = ggml_get_rows(ctx0,
                     ggml_reshape_2d(ctx0, probs_j, 1, probs_j->ne[0]), id_j);

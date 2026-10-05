@@ -29,6 +29,7 @@
 #include "../ggml/src/ggml-backend-moe-cache.h"
 
 #include <algorithm>
+#include <numeric>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -281,6 +282,9 @@ llama_context::llama_context(
             } else {
                 init_draft_vocab(path, params.draft_vocab_hot);
             }
+        } else if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && model.split_mode() != LLAMA_SPLIT_MODE_TENSOR) {
+            // no explicit file: auto-derive the shortlist from tokenizer.ggml.scores in the GGUF
+            init_draft_vocab_auto(params.draft_vocab_hot);
         }
     }
 
@@ -720,6 +724,70 @@ void llama_context::init_draft_vocab(const char * path, int32_t n_hot) {
 
     LLAMA_LOG_INFO("%s: draft vocabulary shortlist: %lld of %lld tokens from '%s', map on %s (%.1f KiB), head %s (%s)\n",
             __func__, (long long) n_sel, (long long) n_vocab, path, ggml_backend_buft_name(buft),
+            (double) n_sel * sizeof(int32_t) / 1024.0, ggml_get_name(head), ggml_type_name(head->type));
+    if (n_hot > 0) {
+        LLAMA_LOG_INFO("%s: draft vocabulary tail: %d of %lld entries are adaptive hot slots\n",
+                __func__, n_hot, (long long) n_sel);
+    }
+}
+
+void llama_context::init_draft_vocab_auto(int32_t n_hot) {
+    const int64_t n_vocab = model.vocab.n_tokens();
+
+    // default shortlist size: 32K, overridable via env
+    int64_t n_sel = 32768;
+    if (const char * env = getenv("LLAMA_DRAFT_VOCAB_SIZE")) {
+        n_sel = atoll(env);
+    }
+    n_sel = std::max<int64_t>(1, std::min(n_sel, n_vocab - 1));
+
+    // collect scores and sort token IDs by score descending
+    std::vector<int32_t> ids(n_vocab);
+    std::iota(ids.begin(), ids.end(), 0);
+    std::partial_sort(ids.begin(), ids.begin() + n_sel, ids.end(),
+        [&](int32_t a, int32_t b) {
+            return model.vocab.token_get_score(a) > model.vocab.token_get_score(b);
+        });
+    ids.resize(n_sel);
+
+    // the map lives next to the head it indexes
+    const ggml_tensor * head = model.output;
+    if (model.hparams.n_layer_nextn > 0 && model.hparams.n_layer() < model.layers.size()) {
+        const auto & nextn = model.layers[model.hparams.n_layer()].nextn;
+        if (nextn.shared_head_head) {
+            head = nextn.shared_head_head;
+        }
+    }
+    if (head == nullptr || head->buffer == nullptr) {
+        LLAMA_LOG_WARN("%s: draft vocabulary auto-shortlist skipped: no allocated output head\n", __func__);
+        return;
+    }
+
+    if (n_hot < 0 || (int64_t) n_hot >= n_sel) {
+        n_hot = 0;
+    }
+
+    ggml_init_params ip = { ggml_tensor_overhead(), nullptr, true };
+    draft_vocab.ctx.reset(ggml_init(ip));
+    draft_vocab.ids = ggml_new_tensor_1d(draft_vocab.ctx.get(), GGML_TYPE_I32, n_sel);
+    ggml_set_name(draft_vocab.ids, "draft_vocab_ids_auto");
+
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(head->buffer);
+    draft_vocab.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(draft_vocab.ctx.get(), buft));
+    if (!draft_vocab.buf) {
+        LLAMA_LOG_WARN("%s: draft vocabulary auto-shortlist: failed to allocate the id map\n", __func__);
+        return;
+    }
+    ggml_backend_tensor_set(draft_vocab.ids, ids.data(), 0, (size_t) n_sel * sizeof(int32_t));
+    draft_vocab.host = std::move(ids);
+
+    draft_vocab.n_hot = n_hot;
+    if (n_hot > 0) {
+        draft_vocab.hot.init(draft_vocab.host, n_vocab, n_hot);
+    }
+
+    LLAMA_LOG_INFO("%s: draft vocabulary auto-shortlist: top %lld of %lld tokens by BPE score, map on %s (%.1f KiB), head %s (%s)\n",
+            __func__, (long long) n_sel, (long long) n_vocab, ggml_backend_buft_name(buft),
             (double) n_sel * sizeof(int32_t) / 1024.0, ggml_get_name(head), ggml_type_name(head->type));
     if (n_hot > 0) {
         LLAMA_LOG_INFO("%s: draft vocabulary tail: %d of %lld entries are adaptive hot slots\n",

@@ -1443,6 +1443,13 @@ struct llm_graph_context {
             ggml_tensor * head_s,
             ggml_tensor * cur) const;
 
+    // [#69/BL7c] the shortlist for one MTP chain step, [n_sel, 1] over the rows of draft_vocab_ids. The chain
+    // emits token ids itself, so no backend sampler has to consume the compact row. nullptr: use the full head.
+    ggml_tensor * build_draft_vocab_logits_chain(
+            ggml_tensor * head_w,
+            ggml_tensor * head_s,
+            ggml_tensor * cur) const;
+
     //
     // dense (out)
     //
