@@ -734,6 +734,18 @@ void llama_context::init_draft_vocab(const char * path, int32_t n_hot) {
 void llama_context::init_draft_vocab_auto(int32_t n_hot) {
     const int64_t n_vocab = model.vocab.n_tokens();
 
+    // collect scores from the GGUF tokenizer (0.0f if not present)
+    std::vector<float> scores(n_vocab);
+    float max_score = 0.0f;
+    for (int64_t i = 0; i < n_vocab; ++i) {
+        scores[i] = model.vocab.token_get_score((llama_token) i);
+        max_score = std::max(max_score, scores[i]);
+    }
+    if (max_score <= 0.0f) {
+        LLAMA_LOG_INFO("%s: draft vocabulary auto-shortlist skipped: tokenizer.ggml.scores not present or all zero\n", __func__);
+        return;
+    }
+
     // default shortlist size: 32K, overridable via env
     int64_t n_sel = 32768;
     if (const char * env = getenv("LLAMA_DRAFT_VOCAB_SIZE")) {
@@ -741,13 +753,11 @@ void llama_context::init_draft_vocab_auto(int32_t n_hot) {
     }
     n_sel = std::max<int64_t>(1, std::min(n_sel, n_vocab - 1));
 
-    // collect scores and sort token IDs by score descending
+    // sort token IDs by score descending, keep top n_sel
     std::vector<int32_t> ids(n_vocab);
     std::iota(ids.begin(), ids.end(), 0);
     std::partial_sort(ids.begin(), ids.begin() + n_sel, ids.end(),
-        [&](int32_t a, int32_t b) {
-            return model.vocab.token_get_score(a) > model.vocab.token_get_score(b);
-        });
+        [&](int32_t a, int32_t b) { return scores[a] > scores[b]; });
     ids.resize(n_sel);
 
     // the map lives next to the head it indexes
