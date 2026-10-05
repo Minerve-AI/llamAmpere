@@ -1202,11 +1202,17 @@ static constexpr __host__ __device__ bool ggml_cuda_fattn_turbo_stage() {
         (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_Q8_0 || type_V == GGML_TYPE_TQ5_0) &&
         ncols2 > 1 && DKQ == 256 && DV == 256;
 }
-template<int DKQ>
-static constexpr __host__ __device__ int ggml_cuda_fattn_turbo_stage_k_row() { return (DKQ/QK8_0) * (int) sizeof(block_q8_0); }
+template<int DKQ, ggml_type type_K>
+static constexpr __host__ __device__ int ggml_cuda_fattn_turbo_stage_k_row() {
+    return type_K == GGML_TYPE_TQ6_0 ? (DKQ/QK_TQ6) * (int) sizeof(block_tq6_0) :
+           type_K == GGML_TYPE_TQ5_0 ? (DKQ/QK_TQ5) * (int) sizeof(block_tq5_0) :
+                                       (DKQ/QK8_0) * (int) sizeof(block_q8_0);
+}
 template<int DV, ggml_type type_V>
 static constexpr __host__ __device__ int ggml_cuda_fattn_turbo_stage_v_row() {
-    return type_V == GGML_TYPE_Q8_0 ? (DV/QK8_0) * (int) sizeof(block_q8_0) : (DV/QK_TURBO3) * (int) sizeof(block_turbo3_0);
+    return type_V == GGML_TYPE_Q8_0     ? (DV/QK8_0)     * (int) sizeof(block_q8_0) :
+           type_V == GGML_TYPE_TQ5_0    ? (DV/QK_TQ5)    * (int) sizeof(block_tq5_0) :
+                                          (DV/QK_TURBO3) * (int) sizeof(block_turbo3_0);
 }
 
 // Padded row size for shared memory staging (next multiple of 16 >= row_bytes)
