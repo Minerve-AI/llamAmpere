@@ -6211,12 +6211,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if ((op->type == GGML_TYPE_TURBO3_0 || op->type == GGML_TYPE_TURBO2_0) && op->src[0]->ne[0] % 64 != 0) {
                     return false;
                 }
-                // turbo4 block size is 128, so head_dim must be divisible by 128
-                if (op->type == GGML_TYPE_TURBO4_0 && op->src[0]->ne[0] % 128 != 0) {
-                    return false;
-                }
-                // TQ5/TQ6 block size is 32, so head_dim must be divisible by 32
-                if ((op->type == GGML_TYPE_TQ5_0 || op->type == GGML_TYPE_TQ6_0) && op->src[0]->ne[0] % 32 != 0) {
+                // turbo4, tq6 and tq5 block size is 128, so head_dim must be divisible by 128
+                if ((op->type == GGML_TYPE_TURBO4_0 || op->type == GGML_TYPE_TQ6_0 || op->type == GGML_TYPE_TQ5_0) && op->src[0]->ne[0] % 128 != 0) {
                     return false;
                 }
                 return (
@@ -6253,6 +6249,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return true;
                 }
                 if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_TQ6_0 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_TQ5_0 && src1_type == GGML_TYPE_F32) {
                     return true;
                 }
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_Q4_0) {
