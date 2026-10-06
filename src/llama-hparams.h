@@ -107,6 +107,9 @@ struct llama_hparams {
     uint32_t n_layer_dense_lead = 0;
     uint32_t n_lora_q           = 0;
     uint32_t n_lora_kv          = 0;
+    uint32_t n_lora_kv_per_layer[64] = {0};
+    uint32_t n_lora_kv_per_layer_count = 0;
+    uint32_t n_mla_fused_rope_dim  = 0;  // total rope dim in fused wkv_a_mqa (n_kv_heads * rope_per_head)
     uint32_t n_ff_par           = 0;
     uint32_t n_ff_shexp         = 0;
     uint32_t n_ff_chexp         = 0;
@@ -120,6 +123,9 @@ struct llama_hparams {
     uint32_t n_lora_kv_swa           = 0;
     uint32_t n_embd_head_k_mla_swa   = 0;
     uint32_t n_embd_head_v_mla_swa   = 0;
+
+    // Helper: returns per-layer KV lora rank if available, else the global n_lora_kv
+    uint32_t n_lora_kv_at(uint32_t idx) const { return idx < n_lora_kv_per_layer_count ? n_lora_kv_per_layer[idx] : n_lora_kv; }
 
     float    expert_group_scale   = 0.05f;
     float    expert_weights_scale = 0.0f;

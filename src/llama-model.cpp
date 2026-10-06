@@ -326,6 +326,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_qwen3next(params);
         case LLM_ARCH_QWEN35:
             return new llama_model_qwen35(params);
+        case LLM_ARCH_QWEN35_MLA:
+            return new llama_model_qwen35mla(params);
         case LLM_ARCH_QWEN35MOE:
             return new llama_model_qwen35moe(params);
         case LLM_ARCH_QWEN4EXP:
