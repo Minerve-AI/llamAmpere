@@ -686,6 +686,34 @@ static fattn_vec_case_t ggml_cuda_get_fattn_vec_case(const int64_t head_size, co
     FATTN_VEC_CASES_ALL_D(TURBO4_0, TURBO2_0)
     FATTN_VEC_CASES_ALL_D(TURBO2_0, TURBO4_0)
 
+    // TurboQuant6 — tq6_0 (block size 128, D=128/256 only)
+    FATTN_VEC_CASE(128, TQ6_0,    TQ6_0)
+    FATTN_VEC_CASE(256, TQ6_0,    TQ6_0)
+    FATTN_VEC_CASE(128, TQ6_0,    TURBO3_0)
+    FATTN_VEC_CASE(256, TQ6_0,    TURBO3_0)
+    FATTN_VEC_CASE(128, TQ6_0,    Q8_0)
+    FATTN_VEC_CASE(256, TQ6_0,    Q8_0)
+    FATTN_VEC_CASE(128, Q8_0,     TQ6_0)
+    FATTN_VEC_CASE(256, Q8_0,     TQ6_0)
+    FATTN_VEC_CASE(128, TQ6_0,    F16)
+    FATTN_VEC_CASE(256, TQ6_0,    F16)
+    FATTN_VEC_CASE(128, F16,      TQ6_0)
+    FATTN_VEC_CASE(256, F16,      TQ6_0)
+
+    // TurboQuant5 — tq5_0 (block size 128, D=128/256 only)
+    FATTN_VEC_CASE(128, TQ5_0,    TQ5_0)
+    FATTN_VEC_CASE(256, TQ5_0,    TQ5_0)
+    FATTN_VEC_CASE(128, TQ5_0,    TURBO3_0)
+    FATTN_VEC_CASE(256, TQ5_0,    TURBO3_0)
+    FATTN_VEC_CASE(128, TQ5_0,    Q8_0)
+    FATTN_VEC_CASE(256, TQ5_0,    Q8_0)
+    FATTN_VEC_CASE(128, Q8_0,     TQ5_0)
+    FATTN_VEC_CASE(256, Q8_0,     TQ5_0)
+    FATTN_VEC_CASE(128, TQ5_0,    F16)
+    FATTN_VEC_CASE(256, TQ5_0,    F16)
+    FATTN_VEC_CASE(128, F16,      TQ5_0)
+    FATTN_VEC_CASE(256, F16,      TQ5_0)
+
     return nullptr;
 }
 
