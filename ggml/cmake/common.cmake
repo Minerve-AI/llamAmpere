@@ -94,7 +94,7 @@ function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
 
     # TurboQuant KV cache types are fork-only and always compiled: they are the point of the
     # fork and the type parser accepts them at run time, so GGML_CUDA_FA_QUANTS does not gate them.
-    set(FA_TURBO_TYPES turbo2_0 turbo3_0 turbo4_0)
+    set(FA_TURBO_TYPES turbo2_0 turbo3_0 turbo4_0 tq5_0 tq6_0)
     set(FA_TURBO_COMBINATIONS "")
     foreach (TURBO IN LISTS FA_TURBO_TYPES)
         list(APPEND FA_TURBO_COMBINATIONS

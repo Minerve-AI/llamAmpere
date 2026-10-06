@@ -316,12 +316,35 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_TURBO2_0,
     GGML_TYPE_TURBO3_0,
     GGML_TYPE_TURBO4_0,
+    GGML_TYPE_TQ5_0,
+    GGML_TYPE_TQ6_0,
+};
+
+// Alternative spellings of the TurboQuant KV cache types
+static const struct {
+    const char * name;
+    ggml_type    type;
+} kv_cache_type_aliases[] = {
+    { "tq2",    GGML_TYPE_TURBO2_0 },
+    { "tq3",    GGML_TYPE_TURBO3_0 },
+    { "tq3_0",  GGML_TYPE_TURBO3_0 },
+    { "tq4",    GGML_TYPE_TURBO4_0 },
+    { "tq4_0",  GGML_TYPE_TURBO4_0 },
+    { "turbo5", GGML_TYPE_TQ5_0    },
+    { "tq5",    GGML_TYPE_TQ5_0    },
+    { "turbo6", GGML_TYPE_TQ6_0    },
+    { "tq6",    GGML_TYPE_TQ6_0    },
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
     for (const auto & type : kv_cache_types) {
         if (ggml_type_name(type) == s) {
             return type;
+        }
+    }
+    for (const auto & alias : kv_cache_type_aliases) {
+        if (alias.name == s) {
+            return alias.type;
         }
     }
     throw std::runtime_error("Unsupported cache type: " + s);
