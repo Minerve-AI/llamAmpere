@@ -1,5 +1,5 @@
-// tq5 K + tq5 V
-// tq5 blocks hold 128 values, so only head dims that are multiples of 128 are instantiated.
+// TurboQuant CUDA flash attention vec kernel instantiation
+// tq5_0/tq5_0 — block size 128, D=128/256 only
 
 #include "../fattn-vec.cuh"
 
