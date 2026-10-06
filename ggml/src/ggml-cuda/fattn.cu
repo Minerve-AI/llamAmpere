@@ -735,6 +735,10 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
             // turbo KV types; head-dim geometry is validated separately in
             // ggml_cuda_get_best_fattn_kernel (multiples of 64 only)
             return true;
+        case GGML_TYPE_TQ6_0:
+        case GGML_TYPE_TQ5_0:
+            // tq6/tq5 KV types; head dim must be a multiple of 128 (block size), checked below
+            return true;
         default:
             return false;
     }
@@ -836,6 +840,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         };
         if ((is_turbo(K->type) && K->ne[0] % 64 != 0) ||
             (is_turbo(V->type) && V->ne[0] % 64 != 0)) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
+        // tq5/tq6 pack 128 values per block and are only instantiated for head dims 128 and 256
+        if (((K->type == GGML_TYPE_TQ6_0 || K->type == GGML_TYPE_TQ5_0) && K->ne[0] % 128 != 0) ||
+            ((V->type == GGML_TYPE_TQ6_0 || V->type == GGML_TYPE_TQ5_0) && V->ne[0] % 128 != 0)) {
             return BEST_FATTN_KERNEL_NONE;
         }
     }
