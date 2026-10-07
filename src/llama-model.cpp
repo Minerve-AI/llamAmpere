@@ -14,6 +14,7 @@
 #include "llama-kv-cache-dsa-iswa.h"
 #include "llama-kv-cache-msa.h"
 #include "llama-kv-cache-dsv4.h"
+#include "llama-kv-cache-kvarn.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-hybrid-idx.h"
@@ -2736,6 +2737,42 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
     llama_memory_i * res;
+
+    // KVarN quantized KV cache (architecture-independent)
+    if (params.kvarn) {
+        llama_kvarn_params kvarn_params;
+        kvarn_params.type         = LLAMA_KVARN_TYPE_K4V4;
+        kvarn_params.key_bits     = params.kvarn_key_bits;
+        kvarn_params.value_bits   = params.kvarn_value_bits;
+        kvarn_params.swa_key_bits = 0;
+        kvarn_params.swa_value_bits = 0;
+        kvarn_params.group        = 128;
+        kvarn_params.sinkhorn_iters = 0;
+        kvarn_params.sink_tokens  = 0;
+        kvarn_params.window_chunk = 0;
+        kvarn_params.fail_if_unsupported = false;
+
+        res = new llama_kv_cache_kvarn(
+                *this,
+                hparams,
+                kvarn_params,
+                cparams.offload_kqv,
+                cparams.kv_unified,
+                cparams.n_ctx_seq,
+                cparams.n_seq_max,
+                cparams.n_batch,
+                cparams.n_ubatch,
+                1, // n_pad
+                hparams.n_swa,
+                hparams.swa_type,
+                nullptr, // filter
+                nullptr, // reuse
+                params.kvarn_tail_tokens, // tail_tokens
+                params.type_k,            // tail_type
+                UINT32_MAX,               // tail_tokens_requested
+                0);                       // tail_rollback_tokens
+        return res;
+    }
 
     switch (arch) {
         // Models that need specific instantiation should be handled in the

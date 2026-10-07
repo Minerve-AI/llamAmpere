@@ -25,6 +25,12 @@ struct llama_memory_params {
     llama_context_type ctx_type;
 
     llama_memory_t mem_other;
+
+    // KVarN quantized KV cache
+    bool kvarn = false;
+    int32_t kvarn_key_bits   = 4;
+    int32_t kvarn_value_bits = 4;
+    uint32_t kvarn_tail_tokens = 0; // 0 = disabled, UINT32_MAX = auto
 };
 
 enum llama_memory_status {

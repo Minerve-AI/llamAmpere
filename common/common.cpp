@@ -1323,6 +1323,13 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         auto cparams_dft = common_context_params_to_llama(params_dft);
         if (spec_mtp) {
             cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+            if (params.speculative.draft.kvarn) {
+                cparams_dft.kvarn.type         = LLAMA_KVARN_TYPE_K4V4;
+                cparams_dft.kvarn.key_bits     = params.speculative.draft.kvarn_key_bits;
+                cparams_dft.kvarn.value_bits   = params.speculative.draft.kvarn_value_bits;
+                cparams_dft.kvarn.group        = 128;
+                cparams_dft.kvarn.fail_if_unsupported = false;
+            }
         }
         cparams_dft.n_rs_seq = 0;
 

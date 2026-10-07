@@ -4263,6 +4263,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--spec-draft-kvarn"},
+        "use KVarN quantized KV cache for the draft model (MTP only)\n"
+        "reduces VRAM usage for the draft context by 4-8x",
+        [](common_params & params) {
+            params.speculative.draft.kvarn = true;
+        }
+    ).set_env("LLAMA_ARG_SPEC_DRAFT_KVARN").set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-draft-kvarn-bits"}, "BITS",
+        "KVarN bit-width for the draft KV cache (2, 3, 4, 6, 8)\n"
+        "applies to both K and V (default: 4)",
+        [](common_params & params, const std::string & value) {
+            int bits = std::stoi(value);
+            if (bits != 2 && bits != 3 && bits != 4 && bits != 6 && bits != 8) {
+                throw std::invalid_argument("--spec-draft-kvarn-bits: expected 2, 3, 4, 6, or 8");
+            }
+            params.speculative.draft.kvarn_key_bits   = bits;
+            params.speculative.draft.kvarn_value_bits = bits;
+        }
+    ).set_env("LLAMA_ARG_SPEC_DRAFT_KVARN_BITS").set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--spec-draft-override-tensor", "-otd", "--override-tensor-draft"}, "<tensor name pattern>=<buffer type>,...",
         "override tensor buffer type for draft model", [](common_params & params, const std::string & value) {
             parse_tensor_buffer_overrides(value, params.speculative.draft.tensor_buft_overrides);

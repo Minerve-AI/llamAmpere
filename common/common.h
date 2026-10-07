@@ -359,6 +359,10 @@ struct common_params_speculative_draft {
     bool    dflash_defer_injection = true;  // defer encoder KV injection to draft time (set false for higher acceptance on some models)
     int32_t n_ctx                 = 0;     // draft context size
 
+    bool    kvarn                 = false; // use KVarN quantized KV cache for the draft model
+    int32_t kvarn_key_bits       = 4;     // KVarN key bit-width (2, 3, 4, 6, 8)
+    int32_t kvarn_value_bits     = 4;     // KVarN value bit-width (2, 3, 4, 6, 8)
+
 };
 
 struct common_params_speculative_ngram_mod {

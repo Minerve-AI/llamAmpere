@@ -66,6 +66,47 @@ static bool common_speculative_mtp_chain_enabled(const common_params_speculative
     return params.chain || (env != nullptr && std::strcmp(env, "0") != 0);
 }
 
+// Validate KVarN mode for the draft model.
+// KVarN is only valid with MTP speculative type and requires the draft model
+// to have MTP layers (n_layer_nextn > 0).
+static bool common_validate_draft_kvarn_mode(
+        const common_params_speculative & params,
+        const llama_model * model_dft) {
+    if (!params.draft.kvarn) {
+        return true; // KVarN not enabled, nothing to validate
+    }
+
+    // KVarN requires MTP (the draft context uses the nextn layers only)
+    if (params.type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP &&
+        params.type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP_ADAPTIVE) {
+        fprintf(stderr, "error: --spec-draft-kvarn requires MTP speculative type (draft-mtp or draft-mtp-adaptive)\n");
+        return false;
+    }
+
+    if (model_dft == nullptr) {
+        fprintf(stderr, "error: --spec-draft-kvarn requires a draft model\n");
+        return false;
+    }
+
+    // The draft model must have MTP layers
+    if (llama_model_n_layer_nextn(model_dft) <= 0) {
+        fprintf(stderr, "error: --spec-draft-kvarn requires the draft model to have MTP layers (n_layer_nextn > 0)\n");
+        return false;
+    }
+
+    // Validate bit-width
+    const int bits = params.draft.kvarn_key_bits;
+    if (bits != 2 && bits != 3 && bits != 4 && bits != 6 && bits != 8) {
+        fprintf(stderr, "error: --spec-draft-kvarn-bits must be 2, 3, 4, 6, or 8 (got %d)\n", bits);
+        return false;
+    }
+
+    SPC_INF("KVarN draft mode: key_bits=%d, value_bits=%d\n",
+            params.draft.kvarn_key_bits, params.draft.kvarn_value_bits);
+
+    return true;
+}
+
 struct common_speculative_config {
     common_speculative_type type;
     common_params_speculative params;
@@ -3460,6 +3501,26 @@ common_speculative_init_result::common_speculative_init_result(
 
     if (spec_mtp) {
         cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+
+        // KVarN quantized KV cache for the draft model
+        if (params.speculative.draft.kvarn) {
+            if (!common_validate_draft_kvarn_mode(params, llama_get_model(ctx_tgt))) {
+                throw std::runtime_error("KVarN draft mode validation failed");
+            }
+            cparams.kvarn.type         = LLAMA_KVARN_TYPE_K4V4;
+            cparams.kvarn.key_bits     = params.speculative.draft.kvarn_key_bits;
+            cparams.kvarn.value_bits   = params.speculative.draft.kvarn_value_bits;
+            cparams.kvarn.swa_key_bits = 0;
+            cparams.kvarn.swa_value_bits = 0;
+            cparams.kvarn.group        = 128;
+            cparams.kvarn.sinkhorn_iters = 0;
+            cparams.kvarn.sink_tokens  = 0;
+            cparams.kvarn.window_chunk = 0;
+            cparams.kvarn.fail_if_unsupported = false;
+            LOG_INF("%s: MTP draft context uses KVarN KV cache (key_bits=%d, value_bits=%d)\n",
+                    __func__, cparams.kvarn.key_bits, cparams.kvarn.value_bits);
+        }
+
         if (!params.speculative.draft.vocab_map.empty()) {
             cparams.draft_vocab_map = params.speculative.draft.vocab_map.c_str();
             cparams.draft_vocab_hot = params.speculative.draft.vocab_hot;

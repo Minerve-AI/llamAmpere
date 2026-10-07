@@ -532,6 +532,14 @@ llama_context::llama_context(
             /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
         };
 
+        // KVarN quantized KV cache
+        if (params.kvarn.type != LLAMA_KVARN_TYPE_NONE) {
+            params_mem.kvarn            = true;
+            params_mem.kvarn_key_bits   = params.kvarn.key_bits;
+            params_mem.kvarn_value_bits = params.kvarn.value_bits;
+            params_mem.kvarn_tail_tokens = 0; // set by the caller if needed
+        }
+
         memory.reset(model.create_memory(params_mem, cparams));
     }
 
