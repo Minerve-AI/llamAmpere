@@ -530,7 +530,7 @@ static __global__ void flash_attn_kvarn_portable(
 // Launch helper
 // ---------------------------------------------------------------------------
 
-template<int DKQ, int DV, int ncols2, bool use_logit_softcap>
+template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap>
 static void launch_fattn_kvarn_portable(
     ggml_backend_cuda_context & ctx,
     ggml_tensor * dst,
@@ -554,7 +554,7 @@ static void launch_fattn_kvarn_portable(
     const uint32_t n_q_cols = Q->ne[1];
     const uint32_t n_heads  = Q->ne[2];
     const uint32_t n_seq    = Q->ne[3];
-    constexpr int ncols1 = cols_per_block / ncols2;
+
     const int grid_x = (n_q_cols + ncols1 - 1) / ncols1;
     const int grid_z = n_seq * n_heads;
 

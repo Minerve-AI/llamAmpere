@@ -17,11 +17,11 @@ static void ggml_cuda_flash_attn_ext_tile_case_kvarn(
     float logit_softcap;
     memcpy(&logit_softcap, (const float *)dst->op_params + 2, sizeof(float));
 
-    // ncols2=1: process one KV head per block (safe default for portable kernel)
+    // ncols1=32, ncols2=1: each block processes 32 Q columns, 1 KV head
     if (logit_softcap == 0.0f) {
-        launch_fattn_kvarn_portable<DKQ, DV, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
+        launch_fattn_kvarn_portable<DKQ, DV, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
     } else {
-        launch_fattn_kvarn_portable<DKQ, DV, 1, true>(ctx, dst, key_bits, value_bits, record_bytes);
+        launch_fattn_kvarn_portable<DKQ, DV, 32, 1, true>(ctx, dst, key_bits, value_bits, record_bytes);
     }
 }
 
