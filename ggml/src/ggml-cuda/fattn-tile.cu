@@ -1,63 +1,17 @@
 #include "common.cuh"
 #include "fattn-tile.cuh"
 #include "fattn-kvarn-dispatch.cuh"
-#include "fattn-kvarn-portable.cuh"
 
-// KVarN entry point for the tile dispatch.
-// Delegates to the portable KVarN kernel which handles all configurations.
-template<int DKQ, int DV>
-static void ggml_cuda_flash_attn_ext_tile_case_kvarn(
-    ggml_backend_cuda_context & ctx,
-    ggml_tensor * dst) {
-
-    int key_bits, value_bits;
-    size_t record_bytes;
-    ggml_cuda_fattn_get_kvarn_params(dst, key_bits, value_bits, record_bytes);
-
-    float logit_softcap;
-    memcpy(&logit_softcap, (const float *)dst->op_params + 2, sizeof(float));
-
-    // ncols1=32, ncols2=1: each block processes 32 Q columns, 1 KV head
-    if (logit_softcap == 0.0f) {
-        launch_fattn_kvarn_portable<DKQ, DV, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
-    } else {
-        launch_fattn_kvarn_portable<DKQ, DV, 32, 1, true>(ctx, dst, key_bits, value_bits, record_bytes);
-    }
-}
+// Forward declaration - defined in fattn-kvarn-tile.cu
+void ggml_cuda_flash_attn_ext_tile_kvarn(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
 void ggml_cuda_flash_attn_ext_tile(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    // Check if KVarN mode is active
+    // KVarN path: dispatch to separate .cu file to avoid nvcc OOM
     if (ggml_cuda_fattn_is_kvarn(dst)) {
-        // KVarN path: dispatch to KVarN-aware kernel
-        const ggml_tensor * K = dst->src[1];
-        const ggml_tensor * V = dst->src[2];
-
-        switch (K->ne[0]) {
-            case  64: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn< 64,  64>(ctx, dst);
-            } break;
-            case  96: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn< 96,  96>(ctx, dst);
-            } break;
-            case 112: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<112, 112>(ctx, dst);
-            } break;
-            case 128: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<128, 128>(ctx, dst);
-            } break;
-            default: {
-                // Unsupported head size for KVarN: fall through to standard path
-                return;
-            } break;
-        }
+        ggml_cuda_flash_attn_ext_tile_kvarn(ctx, dst);
         return;
     }
 
-    // Standard F16 path - fall through to existing implementation
     const ggml_tensor * K = dst->src[1];
     const ggml_tensor * V = dst->src[2];
     switch (K->ne[0]) {
