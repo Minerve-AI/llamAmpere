@@ -33,21 +33,9 @@ void ggml_cuda_flash_attn_ext_tile(ggml_backend_cuda_context & ctx, ggml_tensor 
         const ggml_tensor * V = dst->src[2];
 
         switch (K->ne[0]) {
-            case  40: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn< 40,  40>(ctx, dst);
-            } break;
             case  64: {
                 GGML_ASSERT(V->ne[0] == K->ne[0]);
                 ggml_cuda_flash_attn_ext_tile_case_kvarn< 64,  64>(ctx, dst);
-            } break;
-            case  72: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn< 72,  72>(ctx, dst);
-            } break;
-            case  80: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn< 80,  80>(ctx, dst);
             } break;
             case  96: {
                 GGML_ASSERT(V->ne[0] == K->ne[0]);
@@ -61,34 +49,9 @@ void ggml_cuda_flash_attn_ext_tile(ggml_backend_cuda_context & ctx, ggml_tensor 
                 GGML_ASSERT(V->ne[0] == K->ne[0]);
                 ggml_cuda_flash_attn_ext_tile_case_kvarn<128, 128>(ctx, dst);
             } break;
-            case 192: {
-                GGML_ASSERT(V->ne[0] == 128);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<192, 128>(ctx, dst);
-            } break;
-            case 256: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<256, 256>(ctx, dst);
-            } break;
-            case 320: {
-                GGML_ASSERT(V->ne[0] == 256);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<320, 256>(ctx, dst);
-            } break;
-            case 512: {
-                GGML_ASSERT(V->ne[0] == K->ne[0]);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<512, 512>(ctx, dst);
-            } break;
-#ifndef GGML_USE_HIP
-            case 576: {
-                GGML_ASSERT(V->ne[0] == 512);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<576, 512>(ctx, dst);
-            } break;
-            case 640: {
-                GGML_ASSERT(V->ne[0] == 512);
-                ggml_cuda_flash_attn_ext_tile_case_kvarn<640, 512>(ctx, dst);
-            } break;
-#endif
             default: {
-                GGML_ABORT("KVarN: Unsupported head size");
+                // Unsupported head size for KVarN: fall through to standard path
+                return;
             } break;
         }
         return;
