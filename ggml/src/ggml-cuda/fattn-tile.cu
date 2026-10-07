@@ -1,17 +1,7 @@
 #include "common.cuh"
 #include "fattn-tile.cuh"
-#include "fattn-kvarn-dispatch.cuh"
-
-// Forward declaration - defined in fattn-kvarn-tile.cu
-void ggml_cuda_flash_attn_ext_tile_kvarn(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
 void ggml_cuda_flash_attn_ext_tile(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    // KVarN path: dispatch to separate .cu file to avoid nvcc OOM
-    if (ggml_cuda_fattn_is_kvarn(dst)) {
-        ggml_cuda_flash_attn_ext_tile_kvarn(ctx, dst);
-        return;
-    }
-
     const ggml_tensor * K = dst->src[1];
     const ggml_tensor * V = dst->src[2];
     switch (K->ne[0]) {

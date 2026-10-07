@@ -7,7 +7,7 @@
 // KVarN flash attention dispatch helpers (host-side)
 //
 // The KVarN mode is signaled via op_params[0] == KVARN_MAGIC.
-// The actual kernel is in fattn-kvarn-portable.cuh.
+// KVarN FA kernel not yet implemented - falls through to standard FA.
 // ---------------------------------------------------------------------------
 
 // KVarN magic constant: op_params[0] == 0x4B564152 ("KVAR") signals KVarN mode
