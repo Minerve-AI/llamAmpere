@@ -3,24 +3,6 @@
 #include "fattn-kvarn-dispatch.cuh"
 #include "fattn-kvarn-portable.cuh"
 
-// KVarN magic constant: op_params[0] == 0x4B564152 ("KVAR") signals KVarN mode
-static constexpr uint32_t KVARN_MAGIC = 0x4B564152u;
-
-// Check if the flash attention op is using KVarN format
-static inline bool ggml_cuda_fattn_is_kvarn(const ggml_tensor * dst) {
-    const uint32_t magic = (uint32_t)dst->op_params[0];
-    return magic == KVARN_MAGIC;
-}
-
-// Get KVarN parameters from the flash attention op
-static inline void ggml_cuda_fattn_get_kvarn_params(
-    const ggml_tensor * dst,
-    int & key_bits, int & value_bits, size_t & record_bytes) {
-    key_bits   = (int)dst->op_params[1];
-    value_bits = (int)dst->op_params[2];
-    record_bytes = (size_t)dst->op_params[3];
-}
-
 // KVarN-aware flash attention tile dispatch.
 // When KVarN mode is active, this launches the portable KVarN kernel
 // that reads quantized K/V records directly without dequantizing to F16 first.
