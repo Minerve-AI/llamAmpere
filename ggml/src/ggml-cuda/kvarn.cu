@@ -3173,17 +3173,21 @@ const ggml_backend_kvarn_capabilities * ggml_cuda_kvarn_capabilities() {
     static const ggml_backend_kvarn_capabilities caps = {
         /* .struct_size = */ sizeof(ggml_backend_kvarn_capabilities),
         /* .abi_version = */ 1,
-        /* .n_route_families = */ 1,
-        /* .n_head_dims = */ 2,
-        /* .head_dims = */ { 64, 128 },
-        /* .route_family_mask = */ 0x1,  // ROUTE_F16_WORKSPACE
-        /* .max_bits = */ 8,
-        /* .sinkhorn_iters = */ 4,
-        /* .max_head_slices = */ 4,
-        /* .max_stage_groups = */ 16,
-        /* .max_tail_groups = */ 16,
-        /* .flags = */ 0,
-        /* .reserved = */ { 0, 0, 0 },
+        /* .route_families = */ 1,
+        /* .supported_head_dims = */ 0x3,
+        /* .store_materialize = */ 1,
+        /* .portable_direct_body = */ 0,
+        /* .portable_integrated_tail_f16 = */ 0,
+        /* .portable_integrated_tail_bf16 = */ 0,
+        /* .specialized_generic_mma = */ 0,
+        /* .specialized_decode_split = */ 0,
+        /* .specialized_decode_vector = */ 0,
+        /* .original_v_domain = */ 0,
+        /* .rotated_query_max_portable = */ 0,
+        /* .rotated_query_max_specialized = */ 0,
+        /* .physical_warp_size = */ 32,
+        /* .reserved = */ 0,
+        /* .minimum_dynamic_shared_bytes = */ 0,
     };
     return &caps;
 }
