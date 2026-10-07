@@ -533,7 +533,7 @@ llama_context::llama_context(
         };
 
         // KVarN quantized KV cache
-        if (params.kvarn.type != LLAMA_KVARN_TYPE_NONE) {
+        if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
             params_mem.kvarn            = true;
             params_mem.kvarn_key_bits   = params.kvarn.key_bits;
             params_mem.kvarn_value_bits = params.kvarn.value_bits;
@@ -4484,6 +4484,7 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.kvarn                       =*/ llama_kvarn_default_params(),
         /*.moe_cache_mode              =*/ LLAMA_MOE_CACHE_MODE_UNSPECIFIED,
         /*.moe_cache_budget_mib        =*/ 0,
         /*.abort_callback              =*/ nullptr,
