@@ -22,16 +22,6 @@ void ggml_cuda_flash_attn_ext_tile_kvarn(ggml_backend_cuda_context & ctx, ggml_t
             if (!softcap) launch_fattn_kvarn_portable< 64,  64, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
             else          launch_fattn_kvarn_portable< 64,  64, 32, 1, true >(ctx, dst, key_bits, value_bits, record_bytes);
         } break;
-        case  96: {
-            GGML_ASSERT(V->ne[0] == K->ne[0]);
-            if (!softcap) launch_fattn_kvarn_portable< 96,  96, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
-            else          launch_fattn_kvarn_portable< 96,  96, 32, 1, true >(ctx, dst, key_bits, value_bits, record_bytes);
-        } break;
-        case 112: {
-            GGML_ASSERT(V->ne[0] == K->ne[0]);
-            if (!softcap) launch_fattn_kvarn_portable<112, 112, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
-            else          launch_fattn_kvarn_portable<112, 112, 32, 1, true >(ctx, dst, key_bits, value_bits, record_bytes);
-        } break;
         case 128: {
             GGML_ASSERT(V->ne[0] == K->ne[0]);
             if (!softcap) launch_fattn_kvarn_portable<128, 128, 32, 1, false>(ctx, dst, key_bits, value_bits, record_bytes);
