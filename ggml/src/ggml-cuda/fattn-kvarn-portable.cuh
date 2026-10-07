@@ -83,7 +83,7 @@ static __global__ void flash_attn_kvarn_portable(
         const float m1,
         const uint32_t n_head_log2,
         const float logit_softcap,
-        const int32_t ne00, const uint3   ne01, const int32_t ne02, const int32_t ne03,
+        const int32_t ne00, const unsigned int ne01_x, const unsigned int ne01_y, const unsigned int ne01_z, const int32_t ne02, const int32_t ne03,
                         const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
                         const int32_t nb11, const int32_t nb12, const int64_t nb13,
@@ -107,6 +107,8 @@ static __global__ void flash_attn_kvarn_portable(
     float2     * GGML_CUDA_RESTRICT dst_meta = dst_meta_ptr;
 
     if (DKQ != (int)ne00) return;
+
+    const uint3 ne01 = make_uint3(ne01_x, ne01_y, ne01_z);
 
     constexpr int ncols     = ncols1 * ncols2;
     constexpr int warp_size = 32;
@@ -569,6 +571,9 @@ static void launch_fattn_kvarn_portable(
     const int token_group = KVAR_N_GROUP;
     const int record_dim  = (int)(K->ne[0]); // head dimension
 
+    // Fast division values for Q columns
+    const uint3 ne01_fd = init_fastdiv_values(Q->ne[1]);
+
     // Shared memory
     constexpr size_t smem = (KVAR_N_GROUP * DKQ + KVAR_N_GROUP * DV + cols_per_block * DKQ) * sizeof(float);
 
@@ -586,7 +591,9 @@ static void launch_fattn_kvarn_portable(
             0.0f, 0.0f, 0.0f,
             0,
             0.0f,
-            (int)Q->ne[0], make_uint3((unsigned)Q->ne[1], 0, 0), (int)Q->ne[2], (int)Q->ne[3],
+            (int)Q->ne[0],
+            ne01_fd.x, ne01_fd.y, ne01_fd.z,
+            (int)Q->ne[2], (int)Q->ne[3],
             (int)Q->nb[1], (int)Q->nb[2], (int)Q->nb[3],
             (int)K->ne[0], (int)K->ne[1], (int)K->ne[2], (int)K->ne[3],
             (int)K->nb[1], (int)K->nb[2], (int64_t)K->nb[3],
