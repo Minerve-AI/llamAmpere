@@ -6836,8 +6836,6 @@ struct ggml_tensor * ggml_kvarn_wht(
     result->src[0] = a;
     result->op_params[0] = dim;
 
-    ggml_set_f32(result, 0.0f);
-
     return result;
 }
 
@@ -6871,8 +6869,6 @@ struct ggml_tensor * ggml_kvarn_store(
     result->op_params[1] = sinkhorn_iters;
     result->op_params[2] = is_value;
 
-    ggml_set_f32(result, 0.0f);
-
     return result;
 }
 
@@ -6899,8 +6895,6 @@ struct ggml_tensor * ggml_kvarn_view(
     result->src[2] = indices;
     result->op_params[0] = bits;
     result->op_params[1] = is_value;
-
-    ggml_set_f32(result, 0.0f);
 
     return result;
 }
@@ -6934,8 +6928,6 @@ struct ggml_tensor * ggml_kvarn_materialize(
     result->op_params[1] = is_value;
     result->op_params[2] = stream_start;
     result->op_params[3] = n_stream;
-
-    ggml_set_f32(result, 0.0f);
 
     return result;
 }
