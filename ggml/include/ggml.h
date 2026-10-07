@@ -614,6 +614,11 @@ extern "C" {
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
 
+        GGML_OP_KVARN_WHT,
+        GGML_OP_KVARN_STORE,
+        GGML_OP_KVARN_VIEW,
+        GGML_OP_KVARN_MATERIALIZE,
+
         GGML_OP_UNARY,
 
         GGML_OP_MAP_CUSTOM1,
@@ -2540,6 +2545,56 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
+
+    // KVarN ops: variance-normalized KV-cache quantization
+    //
+    // op_params for KVARN_STORE:
+    //   [0] = bits (2,3,4,5,6,8)
+    //   [1] = sinkhorn_iters
+    //   [2] = 0 for K, 1 for V
+    //
+    // op_params for KVARN_MATERIALIZE:
+    //   [0] = bits
+    //   [1] = 0 for K, 1 for V
+    //   [2] = stream_start (for multi-stream)
+    //   [3] = n_stream
+    //
+    // op_params for KVARN_VIEW:
+    //   [0] = bits
+    //   [1] = 0 for K, 1 for V
+
+    GGML_API struct ggml_tensor * ggml_kvarn_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int64_t               dim);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * current,
+            struct ggml_tensor  * indices,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * records,
+            int64_t               bits,
+            int64_t               sinkhorn_iters,
+            int64_t               is_value);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_view(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * indices,
+            int64_t               bits,
+            int64_t               is_value);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_materialize(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * indices,
+            int64_t               bits,
+            int64_t               is_value,
+            int64_t               stream_start,
+            int64_t               n_stream);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

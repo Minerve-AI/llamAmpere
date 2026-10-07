@@ -1222,6 +1222,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
 
+    "KVARN_WHT",
+    "KVARN_STORE",
+    "KVARN_VIEW",
+    "KVARN_MATERIALIZE",
+
     "UNARY",
 
     "MAP_CUSTOM1",
@@ -1337,6 +1342,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
+
+    "kvarn_wht(a, dim)",
+    "kvarn_store(current, indices, stage, records)",
+    "kvarn_view(records, stage, indices)",
+    "kvarn_materialize(records, stage, indices)",
 
     "unary(x)",
 
@@ -6796,6 +6806,136 @@ struct ggml_tensor * ggml_dsv4_hc_post(
     result->src[1] = residual;
     result->src[2] = post;
     result->src[3] = comb;
+
+    return result;
+}
+
+//
+// KVarN ops
+//
+
+static bool ggml_kvarn_valid_bits(int bits) {
+    return bits == 2 || bits == 3 || bits == 4 || bits == 5 || bits == 6 || bits == 8;
+}
+
+// ggml_kvarn_wht
+//
+// Applies a Walsh-Hadamard Transform along the specified dimension.
+// dim must be 64 or 128.
+//
+struct ggml_tensor * ggml_kvarn_wht(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int64_t               dim) {
+    GGML_ASSERT(a->op == GGML_OP_NONE);
+    GGML_ASSERT(dim == 64 || dim == 128);
+    GGML_ASSERT(a->ne[0] == dim);
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, a);
+    result->op = GGML_OP_KVARN_WHT;
+    result->src[0] = a;
+    result->op_params[0] = dim;
+
+    ggml_set_f32(result, 0.0f);
+
+    return result;
+}
+
+// ggml_kvarn_store
+//
+// Quantizes the current F16 stage into KVarN records at the given indices.
+// current: [n_tokens, n_embd_head] F16 tensor to quantize
+// indices: int64 tensor with encoded cell indices
+// stage:   F16 stage buffer (source)
+// records: packed KVarN record buffer (destination)
+//
+struct ggml_tensor * ggml_kvarn_store(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * current,
+        struct ggml_tensor  * indices,
+        struct ggml_tensor  * stage,
+        struct ggml_tensor  * records,
+        int64_t               bits,
+        int64_t               sinkhorn_iters,
+        int64_t               is_value) {
+    GGML_ASSERT(ggml_kvarn_valid_bits(bits));
+    GGML_ASSERT(sinkhorn_iters > 0);
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, records);
+    result->op = GGML_OP_KVARN_STORE;
+    result->src[0] = current;
+    result->src[1] = indices;
+    result->src[2] = stage;
+    result->src[3] = records;
+    result->op_params[0] = bits;
+    result->op_params[1] = sinkhorn_iters;
+    result->op_params[2] = is_value;
+
+    ggml_set_f32(result, 0.0f);
+
+    return result;
+}
+
+// ggml_kvarn_view
+//
+// Creates a virtual view of KVarN records (lazy dequantization for attention).
+// records: packed KVarN record buffer
+// stage:   F16 stage buffer (for unsealed groups)
+// indices: int64 tensor with encoded cell indices
+//
+struct ggml_tensor * ggml_kvarn_view(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * records,
+        struct ggml_tensor  * stage,
+        struct ggml_tensor  * indices,
+        int64_t               bits,
+        int64_t               is_value) {
+    GGML_ASSERT(ggml_kvarn_valid_bits(bits));
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, records);
+    result->op = GGML_OP_KVARN_VIEW;
+    result->src[0] = records;
+    result->src[1] = stage;
+    result->src[2] = indices;
+    result->op_params[0] = bits;
+    result->op_params[1] = is_value;
+
+    ggml_set_f32(result, 0.0f);
+
+    return result;
+}
+
+// ggml_kvarn_materialize
+//
+// Materializes KVarN records back into F16 for downstream consumption.
+// records: packed KVarN record buffer
+// stage:   F16 stage buffer
+// indices: int64 tensor with encoded cell indices
+// stream_start: starting stream index (for multi-stream)
+// n_stream: number of streams
+//
+struct ggml_tensor * ggml_kvarn_materialize(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * records,
+        struct ggml_tensor  * stage,
+        struct ggml_tensor  * indices,
+        int64_t               bits,
+        int64_t               is_value,
+        int64_t               stream_start,
+        int64_t               n_stream) {
+    GGML_ASSERT(ggml_kvarn_valid_bits(bits));
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, records);
+    result->op = GGML_OP_KVARN_MATERIALIZE;
+    result->src[0] = records;
+    result->src[1] = stage;
+    result->src[2] = indices;
+    result->op_params[0] = bits;
+    result->op_params[1] = is_value;
+    result->op_params[2] = stream_start;
+    result->op_params[3] = n_stream;
+
+    ggml_set_f32(result, 0.0f);
 
     return result;
 }
