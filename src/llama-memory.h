@@ -76,6 +76,10 @@ struct llama_memory_context_i {
 
     // get the current number of KV tokens in the cache (for dynamic ubatch sizing)
     virtual uint32_t get_n_kv() const { return 0; }
+
+    // graph compute lifecycle hooks
+    virtual void graph_compute_start() {}
+    virtual void graph_compute_finish(ggml_status /* status */) {}
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;
@@ -118,6 +122,14 @@ struct llama_memory_i {
     //
     // ops
     //
+
+    struct seq_rm_capability {
+        bool full_clear = true;
+        bool arbitrary_ranges = true;
+        uint32_t suffix_rollback_tokens = UINT32_MAX;
+    };
+
+    virtual seq_rm_capability get_seq_rm_capability() const { return {}; }
 
     // if data == true, the data buffers will also be cleared together with the metadata
     virtual void clear(bool data) = 0;

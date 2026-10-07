@@ -244,6 +244,32 @@ extern "C" {
     LLAMA_API struct llama_kvarn_params llama_kvarn_default_params  (void);
     LLAMA_API struct llama_kvarn_params llama_kvarn_params_for_type (enum llama_kvarn_type type);
 
+    enum llama_kv_tail_coverage_state {
+        LLAMA_KV_TAIL_COVERAGE_NONE,
+        LLAMA_KV_TAIL_COVERAGE_PARTIAL,
+        LLAMA_KV_TAIL_COVERAGE_COMPLETE,
+    };
+
+    enum llama_kv_tail_degradation_flags {
+        LLAMA_KV_TAIL_DEGRADED_NONE            = 0,
+        LLAMA_KV_TAIL_DEGRADED_BODY_ONLY_STATE = 1 << 0,
+        LLAMA_KV_TAIL_DEGRADED_HISTORICAL_OP   = 1 << 1,
+        LLAMA_KV_TAIL_DEGRADED_STATE_RESTORE   = 1 << 2,
+        LLAMA_KV_TAIL_DEGRADED_PAYLOAD_INVALID = 1 << 3,
+    };
+
+    struct llama_kv_tail_coverage_info {
+        enum llama_kv_tail_coverage_state state;
+        uint32_t requested;
+        uint32_t exact;
+        uint32_t degradation_flags;
+    };
+
+    struct llama_kv_tail_coverage_aggregate {
+        uint32_t n_layers;
+        uint32_t effective_window;
+    };
+
     enum llama_split_mode {
         LLAMA_SPLIT_MODE_NONE   = 0, // single GPU
         LLAMA_SPLIT_MODE_LAYER  = 1, // split layers and KV across GPUs

@@ -5,6 +5,7 @@
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
 #include "llama-kv-pages.h"
+#include "llama-kv-cache-tail.h"
 
 #include <unordered_map>
 #include <vector>
@@ -427,13 +428,6 @@ public:
     // llama_kv_cache_context specific API
     //
 
-    ggml_type type_k() const;
-    ggml_type type_v() const;
-
-    // get views of the current state of the cache
-    ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
-
     // TurboQuant rotation accessors
     ggml_tensor * get_turbo_rotation() const;
     ggml_tensor * get_turbo_rotation_inv() const;
@@ -454,30 +448,88 @@ public:
     //   - k_idxs [n_tokens]
     //   - v_cur  [n_embd_head_v, n_head_v, n_tokens]
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
-    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
-    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+    virtual ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    virtual ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+    virtual ggml_tensor * cpy_k_with_tail(
+            ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs,
+            ggml_tensor * tail_idxs, int32_t il) const { return cpy_k(ctx, k_cur, k_idxs, il); }
+    virtual ggml_tensor * cpy_v_with_tail(
+            ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs,
+            ggml_tensor * tail_idxs, int32_t il) const { return cpy_v(ctx, v_cur, v_idxs, il); }
+    virtual ggml_tensor * cpy_k_tail(
+            ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * tail_idxs,
+            int32_t il, ggml_tensor * dependency = nullptr) const { return nullptr; }
+    virtual ggml_tensor * cpy_v_tail(
+            ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * tail_idxs,
+            int32_t il, ggml_tensor * dependency = nullptr) const { return nullptr; }
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
-    // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but
-    //   helps understand the implementation logic of cpy_k and cpy_v
-    ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
-    ggml_tensor * build_input_v_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    virtual ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    virtual ggml_tensor * build_input_v_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    virtual ggml_tensor * build_input_tail_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const { return nullptr; }
+    virtual ggml_tensor * build_input_tail_body_idxs(ggml_context * ctx) const { return nullptr; }
 
-    ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
-    ggml_tensor * build_input_v_rot(ggml_context * ctx) const;
+    virtual ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
+    virtual ggml_tensor * build_input_v_rot(ggml_context * ctx) const;
 
-    void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_tail_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const {}
+    virtual void set_input_tail_body_idxs(ggml_tensor * dst) const {}
+    virtual void set_input_k_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const {}
+    virtual void set_input_v_idxs_backend(ggml_tensor * dst, const llama_ubatch * ubatch) const {}
 
-    void set_input_k_shift   (ggml_tensor * dst) const;
-    void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    virtual void set_input_k_shift   (ggml_tensor * dst) const;
+    virtual void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+    virtual void set_input_kq_mask_tail(
+            ggml_tensor * body, ggml_tensor * exact,
+            ggml_tensor * read_idxs, ggml_tensor * body_read_idxs, ggml_tensor * bias_read_idxs,
+            const llama_ubatch * ubatch, bool causal_attn) const {}
+    virtual void set_input_tail_body_plan(
+            ggml_tensor * query_order, ggml_tensor * run_desc,
+            ggml_tensor * body_mask, const llama_ubatch * ubatch, bool causal_attn) const {}
+    virtual void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
-    void set_input_k_rot(ggml_tensor * dst) const;
-    void set_input_v_rot(ggml_tensor * dst) const;
+    virtual void set_input_k_rot(ggml_tensor * dst) const;
+    virtual void set_input_v_rot(ggml_tensor * dst) const;
+    virtual void set_input_k_rot_backend(ggml_tensor * dst) const {}
+    virtual void set_input_v_rot_backend(ggml_tensor * dst) const {}
+
+    // K/V tensor access (virtual for KVarN override)
+    virtual llama_kv_cache * get_kv() const { return kv; }
+    virtual const llama_kv_cache::slot_info & current_sinfo() const;
+    virtual const slot_info_vec_t & get_sinfos() const { return sinfos; }
+    virtual ggml_type type_k() const { return kv ? kv->type_k() : GGML_TYPE_F16; }
+    virtual ggml_type type_v() const { return kv ? kv->type_v() : GGML_TYPE_F16; }
+    virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
+    virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    virtual ggml_tensor * get_k_tail(ggml_context * ctx, int32_t il) const { return nullptr; }
+    virtual ggml_tensor * get_v_tail(ggml_context * ctx, int32_t il) const { return nullptr; }
+    virtual ggml_tensor * get_k_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const { return nullptr; }
+    virtual ggml_tensor * get_v_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const { return nullptr; }
+
+    // Tail accessors (virtual for KVarN override)
+    virtual uint32_t get_tail_slots() const { return 0; }
+    virtual ggml_type get_tail_type() const { return GGML_TYPE_F16; }
+    virtual uint32_t get_tail_tokens() const { return 0; }
+    virtual uint32_t get_tail_arena_stride() const { return 0; }
+    virtual uint32_t get_tail_attention_stride(uint32_t n_query_tokens = 0) const { return 0; }
+    virtual uint32_t get_tail_body_execution_stride() const { return 0; }
+    virtual uint32_t get_tail_body_execution_rows(int32_t il) const { return 0; }
+    virtual bool has_compact_tail() const { return false; }
+    virtual bool has_kv_body() const { return true; }
+    virtual bool has_kv_body(int32_t il) const { return true; }
+    virtual bool has_tail_current(int32_t il) const { return false; }
+    virtual ggml_backend_dev_t get_tail_backend(int32_t il) const { return nullptr; }
+    virtual llama_kv_tail_storage_kind get_tail_storage_kind() const { return LLAMA_KV_TAIL_STORAGE_DISABLED; }
+    virtual uint32_t get_tail_rollback_tokens() const { return 0; }
+    virtual llama_kv_tail_route get_tail_route(int32_t il) const { return LLAMA_KV_TAIL_ROUTE_NONE; }
+    virtual const llama_kv_tail_layer_route * get_tail_layer_route(int32_t il) const { return nullptr; }
+    virtual bool get_tail_explicit_bias(int32_t il) const { return false; }
+    virtual bool can_pack_tail_body(const llama_ubatch & ubatch) const { return false; }
 
     // see llama_kv_cache::get_prev_tokens()
-    void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
+    virtual void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
     llama_memory_status status;
