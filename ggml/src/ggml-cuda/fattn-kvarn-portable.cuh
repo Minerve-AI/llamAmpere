@@ -554,7 +554,7 @@ static void launch_fattn_kvarn_portable(
     const uint32_t n_q_cols = Q->ne[1];
     const uint32_t n_heads  = Q->ne[2];
     const uint32_t n_seq    = Q->ne[3];
-    const int ncols1 = cols_per_block / ncols2;
+    constexpr int ncols1 = cols_per_block / ncols2;
     const int grid_x = (n_q_cols + ncols1 - 1) / ncols1;
     const int grid_z = n_seq * n_heads;
 
