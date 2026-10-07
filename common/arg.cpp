@@ -2521,6 +2521,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--kv-tail-tokens"}, "N",
+        "number of tokens to keep in high precision at the KV cache tail\n"
+        "0 = disabled, -1 = auto (default: 1024)\n"
+        "(default: 0)",
+        [](common_params & params, const std::string & value) {
+            if (value == "auto" || value == "-1") {
+                params.kv_tail_tokens = -1;
+            } else {
+                params.kv_tail_tokens = std::stoi(value);
+            }
+        }
+    ).set_env("LLAMA_ARG_KV_TAIL_TOKENS"));
+    add_opt(common_arg(
+        {"--kv-tail-type"}, "TYPE",
+        "data type for the KV cache exact tail\n"
+        "allowed values: f16, bf16, f32\n"
+        "(default: f16)",
+        [](common_params & params, const std::string & value) {
+            params.kv_tail_type = kv_cache_type_from_str(value);
+        }
+    ).set_env("LLAMA_ARG_KV_TAIL_TYPE"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {
