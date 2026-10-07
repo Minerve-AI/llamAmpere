@@ -587,11 +587,11 @@ static void launch_fattn_kvarn_portable(
             0,
             0.0f,
             Q->ne[0], {Q->ne[1], 0, 0}, (int)Q->ne[2], (int)Q->ne[3],
-            (int)Q->rb[1], (int)Q->rb[2], (int)Q->rb[3],
+            (int)Q->nb[1], (int)Q->nb[2], (int)Q->nb[3],
             K->ne[0], (int)K->ne[1], (int)K->ne[2], (int)K->ne[3],
-            (int)K->rb[1], (int)K->rb[2], K->rb[3],
-            (int)V->rb[1], (int)V->rb[2], V->rb[3],
+            (int)K->nb[1], (int)K->nb[2], K->nb[3],
+            (int)V->nb[1], (int)V->nb[2], V->nb[3],
             mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-            mask ? (int)mask->rb[1] : 0, mask ? (int)mask->rb[2] : 0, mask ? mask->rb[3] : 0,
+            mask ? (int)mask->nb[1] : 0, mask ? (int)mask->nb[2] : 0, mask ? mask->nb[3] : 0,
             key_bits, value_bits, record_bytes, token_group, record_dim);
 }
