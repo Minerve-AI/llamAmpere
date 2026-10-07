@@ -2741,7 +2741,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
     // KVarN quantized KV cache (architecture-independent)
     if (params.kvarn) {
         llama_kvarn_params kvarn_params;
-        kvarn_params.type         = LLAMA_KVARN_TYPE_K4V4;
+        kvarn_params.type         = LLAMA_KVARN_K4V4_G128;
         kvarn_params.key_bits     = params.kvarn_key_bits;
         kvarn_params.value_bits   = params.kvarn_value_bits;
         kvarn_params.swa_key_bits = 0;
