@@ -19,7 +19,7 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA, hparams.n_embd_head_v_mla_impl, false);
 
     // Load per-layer latent rank array (for non-uniform MLA ranks)
-    ml.get_arr_n(LLM_KV_ATTENTION_LATENT_RANK_PER_LAYER, hparams.n_lora_kv_per_layer, false);
+    ml.get_arr(LLM_KV_ATTENTION_LATENT_RANK_PER_LAYER, hparams.n_lora_kv_per_layer, false);
     for (uint32_t i = 0; i < 64; ++i) {
         if (hparams.n_lora_kv_per_layer[i] > 0) {
             hparams.n_lora_kv_per_layer_count = i + 1;
