@@ -98,6 +98,14 @@ class Qwen35MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             if self._kv_a_buf is None:
                 self._kv_a_buf = {}
             self._kv_a_buf.setdefault(bid, {})["kv_a"] = data_torch
+            # Both parts available? Fuse and emit.
+            buf = self._kv_a_buf.get(bid, {})
+            if "kv_a" in buf and "k_rope" in buf:
+                fused = torch.cat([buf["kv_a"], buf["k_rope"]], dim=0)
+                del self._kv_a_buf[bid]
+                new_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_KV_A_MQA, bid)
+                logger.info(f"  fused wkv_a_mqa [{bid}]: {tuple(fused.shape)}")
+                yield from super().modify_tensors(fused, new_name, bid)
             return
 
         # k_rope_proj: (fused_rope_dim, n_embd) — RoPE key projection
