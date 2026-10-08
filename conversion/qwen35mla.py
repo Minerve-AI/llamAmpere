@@ -41,8 +41,8 @@ class Qwen35MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         n_kv_head = text_cfg["num_key_value_heads"]        # 4
         fused_rope_dim = n_kv_head * mla_qk_rope           # 232
 
-        # Force MQA mode (single virtual KV head for the latent cache)
-        self.hparams["num_key_value_heads"] = 1
+        # Non-absorbed MLA: KV cache stores materialized K/V with n_head heads
+        self.hparams["num_key_value_heads"] = n_head
 
         # Override n_rot: MLA uses mla_qk_rope_head_dim (58), not the standard
         # partial_rotary_factor * head_dim (64). This affects the C++ n_rot() value.
@@ -123,8 +123,8 @@ class Qwen35MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             qk_nope = out_dim // n_head
             self._qk_nope_actual = qk_nope
 
-            # (n_head*qk_nope, lora_rank) -> (n_head, qk_nope, lora_rank) -> (n_head, lora_rank, qk_nope)
-            data_torch = data_torch.view(n_head, qk_nope, lora_rank).transpose(1, 2).contiguous()
+            # (n_head*qk_nope, lora_rank) -> (n_head, qk_nope, lora_rank) -> (qk_nope, lora_rank, n_head)
+            data_torch = data_torch.view(n_head, qk_nope, lora_rank).permute(1, 2, 0).contiguous()
             new_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_K_B, bid)
             logger.info(f"  wk_b [{bid}]: ({out_dim},{lora_rank}) -> {tuple(data_torch.shape)}")
             yield from super().modify_tensors(data_torch, new_name, bid)
@@ -137,8 +137,8 @@ class Qwen35MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             v_head = out_dim // n_head
             self._v_head_dim_actual = v_head
 
-            # (n_head*v_head, lora_rank) -> (n_head, v_head, lora_rank)
-            data_torch = data_torch.view(n_head, v_head, lora_rank).contiguous()
+            # (n_head*v_head, lora_rank) -> (n_head, v_head, lora_rank) -> (lora_rank, v_head, n_head)
+            data_torch = data_torch.view(n_head, v_head, lora_rank).permute(2, 1, 0).contiguous()
             new_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_V_B, bid)
             logger.info(f"  wv_b [{bid}]: ({out_dim},{lora_rank}) -> {tuple(data_torch.shape)}")
             yield from super().modify_tensors(data_torch, new_name, bid)
