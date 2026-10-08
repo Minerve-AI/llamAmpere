@@ -666,6 +666,70 @@ class Qwen3_5MoeTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 
+@ModelBase.register("Qwen3_5MLAForConditionalGeneration", "Qwen3_5MLAForCausalLM")
+@ModelBase.example("TelperionAI/Qwen3.8-27B-MLA")
+class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+    model_arch = gguf.MODEL_ARCH.QWEN35_MLA
+    _mla_buf: dict[int, dict[str, Tensor]] | None = None
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        # MLA-specific parameters
+        qk_nope = self.hparams.get("qk_nope_head_dim", 0)
+        qk_rope = self.hparams.get("qk_rope_head_dim", 0)
+        head_k_mla = qk_nope + qk_rope
+        if head_k_mla > 0:
+            self.gguf_writer.add_key_length_mla(head_k_mla)
+
+        v_head_dim = self.hparams.get("v_head_dim", 0)
+        if v_head_dim > 0:
+            self.gguf_writer.add_value_length_mla(v_head_dim)
+
+        mla_ranks = self.hparams.get("mla_ranks", {})
+        if mla_ranks:
+            ranks = [int(v) for v in mla_ranks.values()]
+            self.gguf_writer.add_kv_lora_rank(min(ranks))
+            self.gguf_writer.add_latent_rank_per_layer(ranks)
+
+        fused_rope_dim = self.hparams.get("mla_model_rope_dim", 0)
+        if fused_rope_dim > 0:
+            self.gguf_writer.add_mla_fused_rope_dim(fused_rope_dim)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if bid is not None and ".self_attn." in name:
+            if name.endswith(".kv_a_proj.weight"):
+                if self._mla_buf is None:
+                    self._mla_buf = {}
+                self._mla_buf.setdefault(bid, {})["kv_a"] = data_torch
+                if "rope" in self._mla_buf[bid]:
+                    fused = torch.cat([self._mla_buf[bid]["kv_a"], self._mla_buf[bid]["rope"]], dim=1)
+                    yield (self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_KV_A_MQA, bid, ".weight"), fused)
+                    del self._mla_buf[bid]
+                return
+            elif name.endswith(".k_rope_proj.weight"):
+                if self._mla_buf is None:
+                    self._mla_buf = {}
+                self._mla_buf.setdefault(bid, {})["rope"] = data_torch
+                if "kv_a" in self._mla_buf[bid]:
+                    fused = torch.cat([self._mla_buf[bid]["kv_a"], self._mla_buf[bid]["rope"]], dim=1)
+                    yield (self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_KV_A_MQA, bid, ".weight"), fused)
+                    del self._mla_buf[bid]
+                return
+            elif name.endswith(".k_up_proj.weight"):
+                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_K_B, bid, ".weight"), data_torch)
+                return
+            elif name.endswith(".v_up_proj.weight"):
+                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_V_B, bid, ".weight"), data_torch)
+                return
+
+        yield from super().modify_tensors(data_torch, name, bid)
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+        if self._mla_buf:
+            raise ValueError(f"Unprocessed MLA tensors: {list(self._mla_buf.keys())}")
+
+
 @ModelBase.register("DFlashDraftModel", "DFlash2DraftModel")
 @ModelBase.example("z-lab/Qwen3.5-9B-DFlash")
 class DFlashModel(Qwen3Model):
