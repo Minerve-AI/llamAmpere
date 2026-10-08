@@ -3153,6 +3153,9 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
+const llama_kv_cache::slot_info & llama_kv_cache_context::current_sinfo() const {
+    return sinfos[i_cur];
+}
 
 ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);

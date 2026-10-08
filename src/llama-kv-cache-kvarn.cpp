@@ -364,3 +364,196 @@ void llama_kv_cache_kvarn_context::set_input_k_rot_backend(ggml_tensor * dst) co
 void llama_kv_cache_kvarn_context::set_input_v_rot_backend(ggml_tensor * dst) const {
     GGML_UNUSED(dst);
 }
+
+//
+// llama_kv_cache_kvarn implementation
+//
+
+std::unique_ptr<llama_kv_cache> llama_kv_cache_kvarn::make_metadata_cache() const {
+    llama_kv_cache_params params;
+    params.n_seq_max  = n_seq_max;
+    params.n_batch    = 0;
+    params.n_ubatch   = metadata_n_ubatch;
+    params.offload    = true;
+    params.swa_full   = false;
+    params.n_pad      = metadata_n_pad;
+    params.n_swa      = metadata_n_swa;
+    params.swa_type   = metadata_swa_type;
+    params.type_k     = exact_tail_type_requested;
+    params.type_v     = exact_tail_type_requested;
+    params.kv_unified = false;
+
+    auto mem = std::make_unique<llama_kv_cache>(
+            model, hparams, params, kv_size);
+    return mem;
+}
+
+llama_kv_cache_kvarn::llama_kv_cache_kvarn(
+        const llama_model & model,
+        const llama_hparams & hparams,
+        llama_kvarn_params params,
+        bool offload,
+        bool unified,
+        uint32_t kv_size,
+        uint32_t n_seq_max,
+        uint32_t n_batch,
+        uint32_t n_ubatch,
+        uint32_t n_pad,
+        uint32_t n_swa,
+        llama_swa_type swa_type,
+        const layer_filter_cb & filter,
+        const layer_reuse_cb & reuse,
+        uint32_t tail_tokens,
+        ggml_type tail_type,
+        uint32_t tail_tokens_requested,
+        uint32_t tail_rollback_tokens)
+    : model(model)
+    , hparams(hparams)
+    , params(params)
+    , n_stream(1)
+    , n_seq_max(n_seq_max)
+    , kv_size(kv_size)
+    , tail_groups(2)
+    , stage_groups(swa_type != LLAMA_SWA_TYPE_NONE ? 2 : 3)
+    , swa(n_swa > 0)
+    , n_groups_per_stream(1)
+    , exact_tail_tokens(tail_tokens)
+    , metadata_n_pad(n_pad)
+    , metadata_n_swa(n_swa)
+    , metadata_swa_type(swa_type)
+    , metadata_n_ubatch(n_ubatch)
+    , exact_tail_tokens_requested(tail_tokens_requested)
+    , exact_tail_type_requested(tail_type)
+    , exact_tail_type(tail_type) {
+
+    metadata = make_metadata_cache();
+
+    // Set up layers
+    const uint32_t n_layer = hparams.n_layer();
+    layers.reserve(n_layer);
+    for (uint32_t il = 0; il < n_layer; il++) {
+        if (filter && !filter(il)) {
+            continue;
+        }
+        layer l;
+        l.il = il;
+        l.n_head_kv = hparams.n_head_kv(il);
+        l.head_dim_k = hparams.n_head(il) * hparams.rope_freq_base(il);
+        l.head_dim_v = hparams.n_head(il);
+        l.k_slices = 1;
+        l.v_slices = 1;
+        l.native_attention = false;
+        l.native_attention_owner = nullptr;
+        l.mixed_tail_native = false;
+        l.native_original_v = false;
+        l.native_rotated_max_query_tokens = 0;
+        l.k_records = nullptr;
+        l.v_records = nullptr;
+        l.k_stage = nullptr;
+        l.v_stage = nullptr;
+        l.k_tail = nullptr;
+        l.v_tail = nullptr;
+        layers.push_back(std::move(l));
+        map_layer_ids[il] = (int32_t)layers.size() - 1;
+    }
+}
+
+const llama_kv_cache_kvarn::layer & llama_kv_cache_kvarn::layer_for(int32_t il) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) {
+        throw std::runtime_error("llama_kv_cache_kvarn::layer_for: unknown layer");
+    }
+    return layers[it->second];
+}
+
+uint32_t llama_kv_cache_kvarn::get_kv_n_stream() const { return n_stream; }
+uint32_t llama_kv_cache_kvarn::get_kv_size() const { return kv_size; }
+bool llama_kv_cache_kvarn::get_can_shift() const { return false; }
+seq_rm_capability llama_kv_cache_kvarn::get_seq_rm_capability() const { return SEQ_RM_CELL; }
+llama_kv_cache * llama_kv_cache_kvarn::get_metadata_cache() const { return metadata.get(); }
+int32_t llama_kv_cache_kvarn::mapped_layer_id(int32_t il) const {
+    auto it = map_layer_ids.find(il);
+    return it != map_layer_ids.end() ? it->second : -1;
+}
+bool llama_kv_cache_kvarn::has_pending_stream_copies() const { return false; }
+bool llama_kv_cache_kvarn::stream_is_exclusive_for(llama_seq_id) const { return false; }
+bool llama_kv_cache_kvarn::apply_pending_stream_copies(llama_context *) { return false; }
+bool llama_kv_cache_kvarn::uses_native_attention(int32_t) const { return false; }
+bool llama_kv_cache_kvarn::has_qualified_dflash_mask() const { return false; }
+ggml_backend_dev_t llama_kv_cache_kvarn::native_attention_backend(int32_t) const { return nullptr; }
+bool llama_kv_cache_kvarn::mixed_tail_native_preferred(int32_t) const { return false; }
+bool llama_kv_cache_kvarn::native_attention_uses_original_v(int32_t) const { return false; }
+uint32_t llama_kv_cache_kvarn::native_rotated_max_query_tokens(int32_t) const { return 0; }
+bool llama_kv_cache_kvarn::requires_state_for_partial_restore() const { return false; }
+bool llama_kv_cache_kvarn::state_seq_can_save(llama_seq_id) const { return false; }
+bool llama_kv_cache_kvarn::state_seq_can_restore(llama_seq_id) const { return false; }
+bool llama_kv_cache_kvarn::state_seq_can_save(llama_seq_id, llama_state_seq_flags) const { return false; }
+bool llama_kv_cache_kvarn::state_seq_can_restore(llama_seq_id, llama_state_seq_flags) const { return false; }
+ggml_tensor * llama_kv_cache_kvarn::get_materialization_source(int32_t, bool) const { return nullptr; }
+std::unique_ptr<llama_kv_cache> llama_kv_cache_kvarn::make_shared_metadata_cache(const llama_model &) const {
+    return std::unique_ptr<llama_kv_cache>();
+}
+llama_kv_tail_route llama_kv_cache_kvarn::get_tail_route(int32_t) const { return LLAMA_KV_TAIL_ROUTE_BODY; }
+bool llama_kv_cache_kvarn::get_tail_explicit_bias(int32_t) const { return false; }
+void llama_kv_cache_kvarn::reset_kv_tail_planner_timing() {}
+uint64_t llama_kv_cache_kvarn::get_kv_tail_planner_timing_ns() const { return 0; }
+bool llama_kv_cache_kvarn::get_kv_tail_coverage(uint32_t, llama_seq_id, llama_kv_tail_coverage_info & out) const {
+    out.covered = 0;
+    out.total = 0;
+    return true;
+}
+
+llama_memory_context_ptr llama_kv_cache_kvarn::init_batch(llama_batch_allocr &, uint32_t, bool) {
+    return nullptr;
+}
+llama_memory_context_ptr llama_kv_cache_kvarn::init_full() {
+    return nullptr;
+}
+llama_memory_context_ptr llama_kv_cache_kvarn::init_update(llama_context *, bool) {
+    return nullptr;
+}
+llama_memory_context_ptr llama_kv_cache_kvarn::init_kv_batch(const std::vector<llama_ubatch> &) {
+    return nullptr;
+}
+void llama_kv_cache_kvarn::clear(bool data) {
+    if (metadata) metadata->clear(data);
+}
+bool llama_kv_cache_kvarn::can_seq_rm(llama_seq_id, llama_pos, llama_pos) const { return false; }
+bool llama_kv_cache_kvarn::seq_rm_plan(llama_seq_id, llama_pos, llama_pos, llama_pos & planned_p0, llama_pos & planned_p1) const {
+    planned_p0 = 0;
+    planned_p1 = 0;
+    return false;
+}
+bool llama_kv_cache_kvarn::seq_rm(llama_seq_id, llama_pos, llama_pos) { return false; }
+bool llama_kv_cache_kvarn::seq_rm_cell(llama_seq_id, uint32_t) { return false; }
+int llama_kv_cache_kvarn::cells_at_pos(llama_seq_id, llama_pos, uint32_t *, int) { return 0; }
+void llama_kv_cache_kvarn::seq_cp(llama_seq_id, llama_seq_id, llama_pos, llama_pos) {}
+void llama_kv_cache_kvarn::seq_keep(llama_seq_id) {}
+void llama_kv_cache_kvarn::seq_add(llama_seq_id, llama_pos, llama_pos, llama_pos) {
+    throw std::runtime_error("llama_kv_cache_kvarn::seq_add not implemented");
+}
+void llama_kv_cache_kvarn::seq_div(llama_seq_id, llama_pos, llama_pos, int) {
+    throw std::runtime_error("llama_kv_cache_kvarn::seq_div not implemented");
+}
+llama_pos llama_kv_cache_kvarn::seq_pos_min(llama_seq_id) const { return 0; }
+llama_pos llama_kv_cache_kvarn::seq_pos_max(llama_seq_id) const { return 0; }
+std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_kvarn::memory_breakdown() const {
+    return {};
+}
+llama_kv_memory_stats llama_kv_cache_kvarn::kv_memory_stats() const {
+    llama_kv_memory_stats stats;
+    stats.n_used = 0;
+    stats.n_free = 0;
+    stats.n_full = 0;
+    return stats;
+}
+void llama_kv_cache_kvarn::state_write(llama_io_write_i &, llama_seq_id, llama_state_seq_flags) const {}
+void llama_kv_cache_kvarn::state_read(llama_io_read_i &, llama_seq_id, llama_state_seq_flags) {}
+void llama_kv_cache_kvarn::state_read_sinfo(llama_io_read_i &, llama_seq_id, llama_state_seq_flags, llama_kv_cache::slot_info_vec_t *, const llama_kv_cache::slot_info_vec_t *) {}
+bool llama_kv_cache_kvarn::can_remove(llama_seq_id, llama_pos, llama_pos) const { return false; }
+void llama_kv_cache_kvarn::copy_kvarn_stream(uint32_t, uint32_t) {}
+ggml_tensor * llama_kv_cache_kvarn::store(ggml_context *, ggml_tensor *, ggml_tensor *, int32_t, const llama_kv_cache::slot_info &, bool) const { return nullptr; }
+ggml_tensor * llama_kv_cache_kvarn::view(ggml_context *, ggml_tensor *, int32_t, uint32_t, const llama_kv_cache::slot_info &, bool, ggml_tensor *) const { return nullptr; }
+ggml_tensor * llama_kv_cache_kvarn::materialize(ggml_context *, ggml_tensor *, int32_t, uint32_t, const llama_kv_cache::slot_info &, bool, ggml_tensor *, bool) const { return nullptr; }
+ggml_tensor * llama_kv_cache_kvarn::get_tail(ggml_context *, int32_t, bool) const { return nullptr; }
+ggml_tensor * llama_kv_cache_kvarn::store_tail(ggml_context *, ggml_tensor *, ggml_tensor *, int32_t, bool, ggml_tensor *) const { return nullptr; }
