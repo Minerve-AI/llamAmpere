@@ -6578,6 +6578,87 @@ struct ggml_tensor * ggml_gated_delta_net(
     return result;
 }
 
+// ggml_gated_delta_net_fused
+// Same as ggml_gated_delta_net but with softplus+scale (gate) and sigmoid (beta)
+// fused into the kernel. In this mode:
+//   src[3] (g)    = raw alpha [1, H, n_tokens, n_seqs] (matmul output, pre-softplus)
+//   src[4] (beta) = raw beta  [1, H, n_tokens, n_seqs] (matmul output, pre-sigmoid)
+//   src[6]        = dt_bias   [H] (F32)
+//   src[7]        = A         [H] (F32, negative values = -exp(A_log))
+// The kernel computes: gate = softplus(alpha + dt_bias) * A, beta = sigmoid(beta_raw)
+// and then applies expf(gate) as the decay factor.
+
+struct ggml_tensor * ggml_gated_delta_net_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * alpha,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * dt_bias,
+        struct ggml_tensor  * A,
+        int64_t               K,
+        int32_t               emit_mode) {
+    GGML_ASSERT(emit_mode == 0 || emit_mode == 1);
+    GGML_ASSERT(ggml_is_contiguous_rows(q));
+    GGML_ASSERT(ggml_is_contiguous_rows(k));
+    GGML_ASSERT(ggml_is_contiguous_rows(v));
+    GGML_ASSERT(ggml_is_contiguous(alpha));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous(state));
+    GGML_ASSERT(ggml_is_contiguous(dt_bias));
+    GGML_ASSERT(ggml_is_contiguous(A));
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(k->type == GGML_TYPE_F32);
+    GGML_ASSERT(v->type == GGML_TYPE_F32);
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+    GGML_ASSERT(state->type == GGML_TYPE_F32);
+    GGML_ASSERT(dt_bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(A->type == GGML_TYPE_F32);
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H        = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    GGML_ASSERT(alpha->ne[0] == 1);
+    GGML_ASSERT(beta->ne[0] == 1);
+    GGML_ASSERT(dt_bias->ne[0] == H);
+    GGML_ASSERT(A->ne[0] == H);
+
+    GGML_ASSERT(state->ne[0] == S_v);
+    GGML_ASSERT(state->ne[1] == S_v);
+    GGML_ASSERT(state->ne[2] == H);
+    GGML_ASSERT(state->ne[3] == n_seqs);
+    GGML_ASSERT(K >= 1);
+
+    const bool    needs_ckpt  = emit_mode == 1 && n_tokens > K;
+    const int64_t state_rows  = emit_mode == 0
+        ? K * S_v * n_seqs
+        : K * 4 * n_seqs + S_v * n_seqs + (needs_ckpt ? S_v * n_seqs : 0);
+    const int64_t ne[4] = { S_v * H, n_tokens * n_seqs + state_rows, 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    ggml_set_op_params_i32(result, 0, (int32_t) K);
+    ggml_set_op_params_i32(result, 1, emit_mode);
+    ggml_set_op_params_i32(result, 2, 1); // fuse flag
+
+    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = alpha;
+    result->src[4] = beta;
+    result->src[5] = state;
+    result->src[6] = dt_bias;
+    result->src[7] = A;
+
+    return result;
+}
+
 // ggml_turbo_wht
 
 struct ggml_tensor * ggml_turbo_wht(

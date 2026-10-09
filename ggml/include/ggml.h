@@ -2713,6 +2713,23 @@ extern "C" {
             int64_t               K,
             int32_t               emit_mode);
 
+    // Fused variant: softplus+scale (gate) and sigmoid (beta) computed inside the kernel.
+    // alpha: [1, H, n_tokens, n_seqs] raw matmul output (pre-softplus)
+    // beta:  [1, H, n_tokens, n_seqs] raw matmul output (pre-sigmoid)
+    // dt_bias: [H] F32, A: [H] F32 (negative = -exp(A_log))
+    GGML_API struct ggml_tensor * ggml_gated_delta_net_fused(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * alpha,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * dt_bias,
+            struct ggml_tensor  * A,
+            int64_t               K,
+            int32_t               emit_mode);
+
     // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
     // Applies WHT rotation to 128-element groups along ne[0]: sign1 → butterfly → sign2 → normalize
     // direction: 0 = forward (signs1 → WHT → signs2), 1 = inverse (signs2 → WHT → signs1)

@@ -467,21 +467,14 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     beta = ggml_reshape_4d(ctx0, beta, 1, num_v_heads, n_seq_tokens, n_seqs);
     cb(beta, "beta", il);
 
-    beta = ggml_sigmoid(ctx0, beta);
-    cb(beta, "beta_sigmoid", il);
-
     ggml_tensor * alpha = build_lora_mm(model.layers[il].ssm_alpha, cur, model.layers[il].ssm_alpha_s);
-    alpha = ggml_reshape_3d(ctx0, alpha, num_v_heads, n_seq_tokens, n_seqs);
+    alpha = ggml_reshape_4d(ctx0, alpha, 1, num_v_heads, n_seq_tokens, n_seqs);
     cb(alpha, "alpha", il);
 
-    ggml_tensor * alpha_biased   = ggml_add(ctx0, alpha, model.layers[il].ssm_dt);
-    ggml_tensor * alpha_softplus = ggml_softplus(ctx0, alpha_biased);
-    cb(alpha_softplus, "a_softplus", il);
-
-    ggml_tensor * gate = ggml_mul(ctx0, alpha_softplus, model.layers[il].ssm_a);  // -A_log.exp() * softplus
-    cb(gate, "gate", il);
-
-    gate = ggml_reshape_4d(ctx0, gate, 1, num_v_heads, n_seq_tokens, n_seqs);
+    // Fused gate/beta: softplus(alpha + dt_bias) * A and sigmoid(beta) computed inside the GDN kernel.
+    // This eliminates 4 kernel launches per layer (add, softplus, mul, sigmoid).
+    ggml_tensor * gate = alpha; // alias: raw alpha passed to fused GDN op
+    (void)gate;
 
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
@@ -553,7 +546,43 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     cb(k_conv, "k_conv_predelta", il);
     cb(v_conv, "v_conv_predelta", il);
 
-    ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il);
+    // Fused GDN: softplus(alpha + dt_bias) * A and sigmoid(beta) computed inside the kernel.
+    // Eliminates 4 kernel launches per layer (add, softplus, mul, sigmoid).
+    const auto * mctx_gdn = inp->mctx;
+    const auto   kv_head  = mctx_gdn->get_head();
+
+    ggml_tensor * gdn_out = ggml_gated_delta_net_fused(ctx0,
+            q_conv, k_conv, v_conv,
+            alpha, beta, state,
+            model.layers[il].ssm_dt, model.layers[il].ssm_a,
+            /*K=*/1, /*emit_mode=*/0);
+    if (n_seq_tokens > 1) {
+        res->add_fused_node({LLM_FUSED_OP_GDN_CH, gdn_out, il});
+    } else {
+        res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
+    }
+
+    const int64_t S_v_gdn = head_v_dim;
+    const int64_t H_v_gdn = num_v_heads;
+    ggml_tensor * output = ggml_view_4d(ctx0, gdn_out,
+            S_v_gdn, H_v_gdn, n_seq_tokens, n_seqs,
+            ggml_row_size(gdn_out->type, S_v_gdn),
+            ggml_row_size(gdn_out->type, S_v_gdn * H_v_gdn),
+            ggml_row_size(gdn_out->type, S_v_gdn * H_v_gdn * n_seq_tokens), 0);
+    cb(output, "attn_output", il);
+
+    ggml_tensor * new_state = ggml_view_4d(ctx0, gdn_out,
+            S_v_gdn, S_v_gdn, H_v_gdn, n_seqs,
+            ggml_row_size(gdn_out->type, S_v_gdn),
+            ggml_row_size(gdn_out->type, S_v_gdn * S_v_gdn),
+            ggml_row_size(gdn_out->type, S_v_gdn * S_v_gdn * H_v_gdn),
+            ggml_row_size(gdn_out->type, S_v_gdn * H_v_gdn * n_seq_tokens * n_seqs));
+    cb(new_state, "new_state", il);
+
+    ggml_build_forward_expand(gf,
+            ggml_cpy(ctx0, new_state,
+                ggml_view_2d(ctx0, ssm_states_all, hparams.n_embd_s(), n_seqs, ssm_states_all->nb[1],
+                    kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
 
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_reshape_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs);
