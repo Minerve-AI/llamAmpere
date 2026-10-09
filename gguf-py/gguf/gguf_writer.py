@@ -999,7 +999,7 @@ class GGUFWriter:
         self.add_uint32(Keys.Attention.KV_LORA_RANK.format(arch=self.arch), length)
 
     def add_latent_rank_per_layer(self, latent_ranks: Sequence[int]) -> None:
-        self.add_array(Keys.Attention.LATENT_RANK_PER_LAYER.format(arch=self.arch), list(latent_ranks))
+        self.add_key_value(Keys.Attention.LATENT_RANK_PER_LAYER.format(arch=self.arch), list(latent_ranks), GGUFValueType.ARRAY, GGUFValueType.UINT32)
 
     def add_mla_fused_rope_dim(self, length: int) -> None:
         self.add_uint32(Keys.Attention.MLA_FUSED_ROPE_DIM.format(arch=self.arch), length)
