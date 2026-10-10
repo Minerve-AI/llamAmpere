@@ -1038,3 +1038,47 @@ void ggml_cuda_op_gated_delta_net_fused_cache(
         ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
     ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
 }
+
+// ---------------------------------------------------------------------------
+// ggml_gdn_gate: fused softplus(alpha + dt_bias) * A
+// Replaces 3 separate kernel launches (add, softplus, mul) with 1.
+// ---------------------------------------------------------------------------
+
+__global__ void gdn_gate_kernel(
+        const float * __restrict__ alpha,
+        const float * __restrict__ dt_bias,
+        const float * __restrict__ A,
+        float *       __restrict__ gate,
+        int64_t H, int64_t n_tokens, int64_t n_seqs) {
+    const int64_t total = H * n_tokens * n_seqs;
+    const int64_t idx   = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    const int64_t h = idx % H;
+    const float x   = alpha[idx] + dt_bias[h];
+    // numerically stable softplus: log(1+exp(x)), clamp for large x
+    const float sp  = (x > 20.0f) ? x : logf(1.0f + expf(x));
+    gate[idx]       = sp * A[h];
+}
+
+void ggml_cuda_op_gdn_gate(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * alpha   = dst->src[0];
+    const ggml_tensor * dt_bias = dst->src[1];
+    const ggml_tensor * A       = dst->src[2];
+
+    const float * alpha_d   = (const float *) alpha->data;
+    const float * dt_bias_d = (const float *) dt_bias->data;
+    const float * A_d       = (const float *) A->data;
+    float *       gate_d    = (float *) dst->data;
+
+    const int64_t H        = alpha->ne[0];
+    const int64_t n_tokens = alpha->ne[1];
+    const int64_t n_seqs   = alpha->ne[2];
+    const int64_t total    = H * n_tokens * n_seqs;
+
+    const int block_size = 256;
+    const int grid_size  = (int)((total + block_size - 1) / block_size);
+
+    gdn_gate_kernel<<<grid_size, block_size, 0, ctx.stream()>>>(
+            alpha_d, dt_bias_d, A_d, gate_d, H, n_tokens, n_seqs);
+}

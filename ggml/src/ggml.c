@@ -1352,9 +1352,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+    "gdn_gate(alpha, dt_bias, A)",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6574,6 +6575,39 @@ struct ggml_tensor * ggml_gated_delta_net(
     result->src[3] = g;
     result->src[4] = beta;
     result->src[5] = state;
+
+    return result;
+}
+
+// ggml_gdn_gate
+
+struct ggml_tensor * ggml_gdn_gate(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * alpha,
+        struct ggml_tensor  * dt_bias,
+        struct ggml_tensor  * A) {
+    GGML_ASSERT(ggml_is_contiguous(alpha));
+    GGML_ASSERT(ggml_is_contiguous(dt_bias));
+    GGML_ASSERT(ggml_is_contiguous(A));
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(dt_bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(A->type == GGML_TYPE_F32);
+    GGML_ASSERT(alpha->ne[1] > 0);
+    GGML_ASSERT(dt_bias->ne[0] == alpha->ne[0]);
+    GGML_ASSERT(A->ne[0] == alpha->ne[0]);
+
+    const int64_t H        = alpha->ne[0];
+    const int64_t n_tokens = alpha->ne[1];
+    const int64_t n_seqs   = alpha->ne[2];
+
+    // output: [1, H, n_tokens, n_seqs] - same memory layout as alpha
+    const int64_t ne[4] = { 1, H, n_tokens, n_seqs };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_GDN_GATE;
+    result->src[0] = alpha;
+    result->src[1] = dt_bias;
+    result->src[2] = A;
 
     return result;
 }

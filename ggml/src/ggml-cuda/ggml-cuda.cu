@@ -2767,6 +2767,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_GATED_DELTA_NET:
             ggml_cuda_op_gated_delta_net(ctx, dst);
             break;
+        case GGML_OP_GDN_GATE:
+            ggml_cuda_op_gdn_gate(ctx, dst);
+            break;
         case GGML_OP_DSV4_HC_COMB:
             ggml_cuda_op_dsv4_hc_comb(ctx, dst);
             break;

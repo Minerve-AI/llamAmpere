@@ -628,6 +628,7 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+        GGML_OP_GDN_GATE,
 
         GGML_OP_COUNT,
     };
@@ -2712,6 +2713,17 @@ extern "C" {
             struct ggml_tensor  * state,
             int64_t               K,
             int32_t               emit_mode);
+
+    // Fused GDN gate computation: gate = softplus(alpha + dt_bias) * A
+    // alpha:   [H, n_tokens, n_seqs] F32
+    // dt_bias: [H] F32 (broadcast)
+    // A:       [H] F32 (broadcast)
+    // output:  [1, H, n_tokens, n_seqs] F32 (same memory layout as alpha)
+    GGML_API struct ggml_tensor * ggml_gdn_gate(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * alpha,
+            struct ggml_tensor  * dt_bias,
+            struct ggml_tensor  * A);
 
     // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
     // Applies WHT rotation to 128-element groups along ne[0]: sign1 → butterfly → sign2 → normalize
