@@ -18,6 +18,7 @@ struct llama_memory_params {
     // kv cache
     ggml_type type_k;
     ggml_type type_v;
+    ggml_type type_s; // recurrent state type (GDN)
 
     // use full-size SWA cache
     bool swa_full;
