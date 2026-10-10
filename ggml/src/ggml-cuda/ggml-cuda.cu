@@ -3245,8 +3245,9 @@ static int ggml_cuda_try_gdn_cache_fusion(
         return 0;
     }
 
-    fused_state_cpy.data        = (float *) dst->data; // rollback group 0 (newest)
-    fused_state_cpy.slot_stride = K > 1 ? (int64_t) (dst->nb[2] / sizeof(float)) : 0;
+    fused_state_cpy.data        = dst->data; // rollback group 0 (newest)
+    fused_state_cpy.is_f16      = (dst->type == GGML_TYPE_F16);
+    fused_state_cpy.slot_stride = K > 1 ? (int64_t) (dst->nb[2] / ggml_element_size(dst->type)) : 0;
     return skip;
 }
 
@@ -5313,9 +5314,10 @@ static void ggml_cuda_gdn_state_read_plan(ggml_backend_cuda_context * cuda_ctx, 
 
         ggml_backend_cuda_context::gdn_state_read_entry e;
         e.gdn        = gdn;
-        e.base       = (const float *) cache->data;
+        e.base       = cache->data;
         e.rows       = (const int32_t *) rows->data;
-        e.row_stride = (int64_t) (cache->nb[1] / sizeof(float));
+        e.is_f16     = (cache->type == GGML_TYPE_F16);
+        e.row_stride = (int64_t) (cache->nb[1] / ggml_element_size(cache->type));
         cuda_ctx->gdn_state_reads.push_back(e);
     }
 }

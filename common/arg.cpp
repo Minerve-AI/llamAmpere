@@ -2521,6 +2521,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"-cts", "--cache-type-s"}, "TYPE",
+        string_format(
+            "recurrent state data type for GDN layers\n"
+            "allowed values: f32, f16\n"
+            "(default: %s)",
+            ggml_type_name(params.recurrent_state_dtype)
+        ),
+        [](common_params & params, const std::string & value) {
+            params.recurrent_state_dtype = kv_cache_type_from_str(value);
+        }
+    ).set_env("LLAMA_ARG_CACHE_TYPE_S"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {
