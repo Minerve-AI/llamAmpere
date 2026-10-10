@@ -613,6 +613,11 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
     const int64_t n_seqs       = s->ne[3];
     const int64_t n_seq_tokens = q->ne[2];
 
+    // Cast state to F32 for computation (stored in F16 for memory efficiency)
+    if (s->type != GGML_TYPE_F32) {
+        s = ggml_cast(ctx0, s, GGML_TYPE_F32);
+    }
+
     const bool keep = cparams.n_rs_seq > 0;
 
     if (!keep) {
