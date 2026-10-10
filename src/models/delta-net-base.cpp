@@ -769,6 +769,13 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
         ggml_tensor * v_b = comp(S_v, 1);
         ggml_tensor * g_b = comp(kda ? S_v : 1, 2);
         ggml_tensor * b_b = comp(1, 3);
+        // Cast F16 ring tensors to F32 for computation (stored in F16 for memory efficiency)
+        if (k_b->type != GGML_TYPE_F32) {
+            k_b = ggml_cast(ctx0, k_b, GGML_TYPE_F32);
+            v_b = ggml_cast(ctx0, v_b, GGML_TYPE_F32);
+            g_b = ggml_cast(ctx0, g_b, GGML_TYPE_F32);
+            b_b = ggml_cast(ctx0, b_b, GGML_TYPE_F32);
+        }
         ggml_tensor * q_dummy = ggml_scale(ctx0, k_b, 0.0f); // q only shapes the (discarded) attn output
         ggml_tensor * out = ggml_gated_delta_net(ctx0, q_dummy, k_b, v_b, g_b, b_b, state4d, /*K=*/1, /*emit_mode=*/0);
         return extract_state_k1(out, (int64_t) count);
