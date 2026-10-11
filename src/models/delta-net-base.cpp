@@ -747,6 +747,10 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
 
     ggml_tensor * s_ckpt = build_rs(inp, ckpt_all, hparams.n_embd_s(), n_seqs);
     s_ckpt = ggml_reshape_4d(ctx0, s_ckpt, S_v, S_v, H_v, n_seqs);
+    // ggml_gated_delta_net requires an F32 state (ggml.c assert); s_ckpt is stored in type_s (F16 with -cts f16)
+    if (s_ckpt->type != GGML_TYPE_F32) {
+        s_ckpt = ggml_cast(ctx0, s_ckpt, GGML_TYPE_F32);
+    }
 
     // the whole ring of every sequence in the ubatch, gathered (and, after seq_cp or a cell
     // move, relocated) by the same s_copy mechanism as the state itself: [ring_row, n_seqs]
