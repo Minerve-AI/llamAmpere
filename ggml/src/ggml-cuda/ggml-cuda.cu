@@ -5315,7 +5315,7 @@ static void ggml_cuda_gdn_state_read_plan(ggml_backend_cuda_context * cuda_ctx, 
         e.gdn        = gdn;
         e.base       = cache->data;
         e.rows       = (const int32_t *) rows->data;
-        e.row_stride = (int64_t) (cache->nb[1] / ggml_element_size(cache->type));
+        e.row_stride = (int64_t) (cache->nb[1] / ggml_type_size(cache->type));
         cuda_ctx->gdn_state_reads.push_back(e);
     }
 }
