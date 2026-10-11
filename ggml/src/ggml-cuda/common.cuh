@@ -1583,7 +1583,7 @@ struct ggml_backend_cuda_context {
     // pointer + row indices so the GDN kernel can read directly from the cache.
     struct gdn_state_read_entry {
         const ggml_tensor * gdn        = nullptr;  // the GDN tensor this entry belongs to
-        const float *       base       = nullptr;  // source cache base pointer
+        const void *        base       = nullptr;  // source cache base pointer (float* or __half*)
         const int32_t *     rows       = nullptr;  // per-sequence row indices (device)
         int64_t             row_stride = 0;        // floats between consecutive rows
         bool                used       = false;    // set true when the kernel consumed it

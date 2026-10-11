@@ -630,6 +630,7 @@ struct common_params {
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+    ggml_type recurrent_state_dtype = GGML_TYPE_F32;
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 

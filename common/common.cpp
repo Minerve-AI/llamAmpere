@@ -1808,6 +1808,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
+    cparams.type_s = params.recurrent_state_dtype;
 
     if (params.moe_cache.mode_explicit) {
         switch (params.moe_cache.mode) {
