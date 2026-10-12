@@ -44,7 +44,7 @@ static __device__ __forceinline__ unsigned short ld_cs_16b(const void * p) {
 // DRAM round trips per GDN layer per token.
 
 static __device__ __forceinline__ void prefetch_l2_evict_last(const void * p) {
-    asm volatile("prefetch.global.L2 [%0], 128;" :: "l"(p));
+    asm volatile("prefetch.global.L2 [%0];" :: "l"(p));
 }
 
 #else  // sm < 860: no-ops
