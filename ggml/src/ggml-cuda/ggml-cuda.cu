@@ -4462,6 +4462,22 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                     fused_node_count  = n_ops;
                     break;
                 }
+
+                // Fused GLU MMQ for prefill (batch > 1): fuse up_proj + gate_proj + swiglu into 1 kernel
+                if (fusion_data.gate && !ids &&
+                        src0->type == fusion_data.gate->type &&
+                        ggml_is_quantized(src0->type) &&
+                        src1->type == GGML_TYPE_F32 &&
+                        cgraph->nodes[glu_idx]->type == GGML_TYPE_F32 &&
+                        src1->ne[1] > 1 &&
+                        src0->type != GGML_TYPE_Q8_CR && src0->type != GGML_TYPE_Q5_CR && src0->type != GGML_TYPE_Q6_CR &&
+                        ggml_cuda_should_use_mmq(src0->type, ggml_cuda_info().devices[ggml_cuda_get_device()].cc, src1->ne[1], 0)) {
+                    ggml_cuda_mul_mat_q_fused_glu(*cuda_ctx, up_n->src[0], src1, fusion_data.gate, cgraph->nodes[glu_idx],
+                        fusion_data.glu_op, fusion_data.glu_limit);
+                    fused_mul_mat_vec = true;
+                    fused_node_count  = n_ops;
+                    break;
+                }
             }
 
             if (fused_mul_mat_vec) {
