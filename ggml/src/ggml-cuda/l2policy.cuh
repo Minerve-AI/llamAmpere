@@ -43,8 +43,8 @@ static __device__ __forceinline__ unsigned short ld_cs_16b(const void * p) {
 // The state is reused every token, so keeping it in L2 avoids 256B-2KB
 // DRAM round trips per GDN layer per token.
 
-static __device__ __forceinline__ void prefetch_l2_evict_last(const void * p, int bytes = 128) {
-    asm volatile("prefetch.global.L2::evict_last [%0], %1;" :: "l"(p), "n"(bytes));
+static __device__ __forceinline__ void prefetch_l2_evict_last(const void * p) {
+    asm volatile("prefetch.global.L2::evict_last [%0], 128;" :: "l"(p));
 }
 
 #else  // sm < 860: no-ops
@@ -52,6 +52,6 @@ static __device__ __forceinline__ void prefetch_l2_evict_last(const void * p, in
 static __device__ __forceinline__ int ld_cs_4(const void * p) { return *(const int *)p; }
 static __device__ __forceinline__ unsigned int ld_cs_8(const void * p) { return *(const unsigned int *)p; }
 static __device__ __forceinline__ unsigned short ld_cs_16b(const void * p) { return *(const unsigned short *)p; }
-static __device__ __forceinline__ void prefetch_l2_evict_last(const void *, int) {}
+static __device__ __forceinline__ void prefetch_l2_evict_last(const void *) {}
 
 #endif
