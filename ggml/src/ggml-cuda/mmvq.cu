@@ -53,28 +53,27 @@ static __device__ __forceinline__ void vec_dot_q4_K_q8_1_multi(
         const int stride_col_y, const int kby, const int kbx, const int iqs,
         float (&dots)[ncols_dst]) {
     const block_q4_K * bq4_K = (const block_q4_K *) vbq + kbx;
-    const unsigned long long pol = l2_policy_evict_first();
 
     int v[2];
     const int bq8_offset = QR4_K * ((iqs/2) / (QI8_1/2));
     const int * q4 = (const int *)(bq4_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
-    v[0] = ld_w4(q4, pol);
-    v[1] = ld_w4(q4 + 4, pol);
+    v[0] = ld_cs_4(q4);
+    v[1] = ld_cs_4(q4 + 4);
 
     const uint16_t * scales = (const uint16_t *) bq4_K->scales;
     uint16_t aux[2];
     const int sj = bq8_offset/2;
     if (sj < 2) {
-        aux[0] = ld_w16b(scales + sj+0) & 0x3f3f;
-        aux[1] = ld_w16b(scales + sj+2) & 0x3f3f;
+        aux[0] = ld_cs_16b(scales + sj+0) & 0x3f3f;
+        aux[1] = ld_cs_16b(scales + sj+2) & 0x3f3f;
     } else {
-        aux[0] = ((ld_w16b(scales + sj+2) >> 0) & 0x0f0f) | ((ld_w16b(scales + sj-2) & 0xc0c0) >> 2);
-        aux[1] = ((ld_w16b(scales + sj+2) >> 4) & 0x0f0f) | ((ld_w16b(scales + sj-0) & 0xc0c0) >> 2);
+        aux[0] = ((ld_cs_16b(scales + sj+2) >> 0) & 0x0f0f) | ((ld_cs_16b(scales + sj-2) & 0xc0c0) >> 2);
+        aux[1] = ((ld_cs_16b(scales + sj+2) >> 4) & 0x0f0f) | ((ld_cs_16b(scales + sj-0) & 0xc0c0) >> 2);
     }
     const uint8_t * sc = (const uint8_t *) aux;
     const uint8_t * m  = sc + 2;
 
-    int dm_raw = ld_w4(&bq4_K->dm, pol);
+    int dm_raw = ld_cs_4(&bq4_K->dm);
     const half2 dm_loaded = *reinterpret_cast<const half2*>(&dm_raw);
 
 #pragma unroll
