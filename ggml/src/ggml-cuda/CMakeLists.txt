@@ -144,6 +144,16 @@ if (CUDAToolkit_FOUND)
         add_compile_definitions(GGML_CUDA_NO_PEER_COPY)
     endif()
 
+    # Fused GLU MMQ: restrict J values to reduce compilation time
+    if(NOT GGML_CUDA_FUSED_J)
+        set(_ggml_fused_j_list 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128)
+    else()
+        string(REPLACE "," " " _ggml_fused_j_list "${GGML_CUDA_FUSED_J}")
+    endif()
+    foreach(_j IN LISTS _ggml_fused_j_list)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_FUSED_J_${_j}=1)
+    endforeach()
+
     if (GGML_STATIC)
         if (WIN32)
             # As of 12.3.1 CUDA Toolkit for Windows does not offer a static cublas library

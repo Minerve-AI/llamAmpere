@@ -2305,35 +2305,270 @@ static void mul_mat_q_switch_J_fused(ggml_backend_cuda_context & ctx, const mmq_
     int ntiles_J_best = INT_MAX;
 
     for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) {
-        const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J, fallback, cc);
-        if (config.type == GGML_TYPE_COUNT) continue;
-        if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+#ifdef GGML_FUSED_J_8
+        if (J == 8) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 8, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
 
-        const int ntiles_x = (args.ncols_opt + config.J - 1) / config.J;
-        if (ntiles_x < ntiles_J_best) {
-            J_best = J;
-            ntiles_J_best = ntiles_x;
+            const int ntiles_x = (args.ncols_opt + 8 - 1) / 8;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 8;
+                ntiles_J_best = ntiles_x;
+            }
         }
+#endif
+#ifdef GGML_FUSED_J_16
+        if (J == 16) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 16, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 16 - 1) / 16;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 16;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_24
+        if (J == 24) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 24, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 24 - 1) / 24;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 24;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_32
+        if (J == 32) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 32, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 32 - 1) / 32;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 32;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_40
+        if (J == 40) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 40, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 40 - 1) / 40;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 40;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_48
+        if (J == 48) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 48, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 48 - 1) / 48;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 48;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_56
+        if (J == 56) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 56, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 56 - 1) / 56;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 56;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_64
+        if (J == 64) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 64, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 64 - 1) / 64;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 64;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_72
+        if (J == 72) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 72, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 72 - 1) / 72;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 72;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_80
+        if (J == 80) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 80, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 80 - 1) / 80;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 80;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_88
+        if (J == 88) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 88, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 88 - 1) / 88;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 88;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_96
+        if (J == 96) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 96, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 96 - 1) / 96;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 96;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_104
+        if (J == 104) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 104, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 104 - 1) / 104;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 104;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_112
+        if (J == 112) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 112, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 112 - 1) / 112;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 112;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_120
+        if (J == 120) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 120, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 120 - 1) / 120;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 120;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+#ifdef GGML_FUSED_J_128
+        if (J == 128) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, 128, fallback, cc);
+            if (config.type == GGML_TYPE_COUNT) continue;
+            if (mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+
+            const int ntiles_x = (args.ncols_opt + 128 - 1) / 128;
+            if (ntiles_x < ntiles_J_best) {
+                J_best = 128;
+                ntiles_J_best = ntiles_x;
+            }
+        }
+#endif
+    }
+
+    if (J_best == 0) {
+        GGML_ABORT("fused MMQ: no J value compiled. Set -DGGML_CUDA_FUSED_J to include J values.\n");
     }
 
     switch (J_best) {
+#ifdef GGML_FUSED_J_8
         case   8: launch_mul_mat_q_fused<type,   8, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_16
         case  16: launch_mul_mat_q_fused<type,  16, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_24
         case  24: launch_mul_mat_q_fused<type,  24, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_32
         case  32: launch_mul_mat_q_fused<type,  32, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_40
         case  40: launch_mul_mat_q_fused<type,  40, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_48
         case  48: launch_mul_mat_q_fused<type,  48, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_56
         case  56: launch_mul_mat_q_fused<type,  56, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_64
         case  64: launch_mul_mat_q_fused<type,  64, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_72
         case  72: launch_mul_mat_q_fused<type,  72, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_80
         case  80: launch_mul_mat_q_fused<type,  80, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_88
         case  88: launch_mul_mat_q_fused<type,  88, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_96
         case  96: launch_mul_mat_q_fused<type,  96, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_104
         case 104: launch_mul_mat_q_fused<type, 104, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_112
         case 112: launch_mul_mat_q_fused<type, 112, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_120
         case 120: launch_mul_mat_q_fused<type, 120, fallback>(ctx, args, stream); break;
+#endif
+#ifdef GGML_FUSED_J_128
         case 128: launch_mul_mat_q_fused<type, 128, fallback>(ctx, args, stream); break;
-        default: GGML_ABORT("fused: J_best=%d\n", J_best); break;
+#endif
+        default: GGML_ABORT("fused MMQ: J_best=%d not compiled. Set -DGGML_CUDA_FUSED_J to include it.\n", J_best); break;
     }
 }
 
