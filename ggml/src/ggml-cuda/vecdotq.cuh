@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include "l2policy.cuh"
 
 #include <cstdint>
 
@@ -1273,17 +1274,18 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     // iqs = 12..15 -> bq8_offset = 6, want q4_offset = 96, 100, 104, 108
 
     const int * q4 = (const int *)(bq4_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
-    v[0] = q4[0];
-    v[1] = q4[4];
+    const unsigned long long pol = l2_policy_evict_first();
+    v[0] = ld_w4(q4, pol);
+    v[1] = ld_w4(q4 + 4, pol);
 
     // branchless so nvcc can hoist this out of the ncols_dst loop
     const uint16_t * scales = (const uint16_t *)bq4_K->scales;
     const int j  = bq8_offset/2;
     const int jm = j & 1;
 
-    const uint32_t s0 = scales[jm + 0];
-    const uint32_t s2 = scales[jm + 2];
-    const uint32_t s4 = scales[jm + 4];
+    const uint32_t s0 = ld_w16b(scales + jm + 0);
+    const uint32_t s2 = ld_w16b(scales + jm + 2);
+    const uint32_t s4 = ld_w16b(scales + jm + 4);
 
     const uint32_t hi = (uint32_t) -(int32_t) (j >= 2);
 
@@ -1302,7 +1304,11 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
         u[2*i+1] = q8[4];
     }
 
-    return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, bq4_K->dm, d8);
+    {
+        int dm_raw = ld_w4(&bq4_K->dm, pol);
+        const half2 dm_loaded = *reinterpret_cast<const half2*>(&dm_raw);
+        return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, m, dm_loaded, d8);
+    }
 }
 
 static __device__ __forceinline__ float vec_dot_q5_K_q8_1(

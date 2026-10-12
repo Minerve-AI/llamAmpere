@@ -1,5 +1,6 @@
 #include "gated_delta_net.cuh"
 #include "ggml-cuda/common.cuh"
+#include "ggml-cuda/l2policy.cuh"
 
 #include <cstdlib>
 
@@ -306,6 +307,16 @@ gated_delta_net_cuda_ilp(const T_in * q,
     float s_shard[NC][rows_per_lane];
 
     ggml_cuda_pdl_sync();
+
+    // Prefetch the recurrent state into L2 with evict-last priority so it
+    // survives the weight stream from concurrent MMVQ kernels on other SMs.
+    {
+        const int state_bytes = NC * S_v * sizeof(T_state);
+        for (int off = lane * 128; off < state_bytes; off += warp_size * 128) {
+            prefetch_l2_evict_last(reinterpret_cast<const char*>(curr_state) + off);
+        }
+    }
+
 #pragma unroll
     for (int c = 0; c < NC; c++) {
 #pragma unroll
@@ -513,6 +524,15 @@ gated_delta_net_tiled_cuda(const T_in * q,
     float s_shard[COLS][rows_per_lane];
 
     ggml_cuda_pdl_sync();
+
+    // Prefetch recurrent state into L2 with evict-last priority
+    {
+        const int state_bytes = COLS * S_v * sizeof(T_state);
+        for (int off = lane * 128; off < state_bytes; off += warp_size * 128) {
+            prefetch_l2_evict_last(reinterpret_cast<const char*>(curr_state) + off);
+        }
+    }
+
 #pragma unroll
     for (int c = 0; c < COLS; c++) {
 #pragma unroll
