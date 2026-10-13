@@ -916,6 +916,8 @@ static void mul_mat_q_case_fused(ggml_backend_cuda_context & ctx, const mmq_args
 static void ggml_cuda_mul_mat_q_fused_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
         case GGML_TYPE_Q4_K:    mul_mat_q_case_fused<GGML_TYPE_Q4_K>(ctx, args, stream); break;
+        case GGML_TYPE_Q5_K:    mul_mat_q_case_fused<GGML_TYPE_Q5_K>(ctx, args, stream); break;
+        case GGML_TYPE_Q6_K:    mul_mat_q_case_fused<GGML_TYPE_Q6_K>(ctx, args, stream); break;
         case GGML_TYPE_Q8_0:    mul_mat_q_case_fused<GGML_TYPE_Q8_0>(ctx, args, stream); break;
         default: GGML_ABORT("unsupported type %d for fused MMQ\n", (int)args.type_x); break;
     }
