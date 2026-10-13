@@ -952,6 +952,14 @@ void ggml_cuda_mul_mat_q_fused_glu(
     GGML_ASSERT(src0->ne[0] == src0_gate->ne[0]);
     GGML_ASSERT(src0->ne[1] == src0_gate->ne[1]);
 
+    // Debug: confirm fused GLU MMQ is being called
+    static int fused_glu_call_count = 0;
+    if (fused_glu_call_count < 5) {
+        fprintf(stderr, "[FUSED-GLU-MMQ] call #%d: batch=%ld, hidden=%ld, inter=%ld, type=%d\n",
+            fused_glu_call_count, (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1], (int)src0->type);
+    }
+    fused_glu_call_count++;
+
     GGML_TENSOR_BINARY_OP_LOCALS;
 
     cudaStream_t stream = ctx.stream();
