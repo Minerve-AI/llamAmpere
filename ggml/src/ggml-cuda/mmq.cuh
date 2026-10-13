@@ -2614,78 +2614,7 @@ static void ggml_cuda_mul_mat_q_fused_switch_type(ggml_backend_cuda_context & ct
 void ggml_cuda_mul_mat_q_fused_glu(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
         const ggml_tensor * src0_gate, ggml_tensor * dst,
-        ggml_glu_op glu_op, float glu_limit) {
-    GGML_ASSERT(src1->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
-    GGML_ASSERT(src0->type == src0_gate->type);
-    GGML_ASSERT(src0->ne[0] == src0_gate->ne[0]);
-    GGML_ASSERT(src0->ne[1] == src0_gate->ne[1]);
-
-    GGML_TENSOR_BINARY_OP_LOCALS;
-
-    cudaStream_t stream = ctx.stream();
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-
-    const size_t ts_src0 = ggml_type_size(src0->type);
-    const size_t ts_src1 = ggml_type_size(src1->type);
-    const size_t ts_dst  = ggml_type_size(dst->type);
-
-    const char  * src0_d      = (const char *) src0->data;
-    const char  * src0_gate_d = (const char *) src0_gate->data;
-    const float * src1_d      = (const float *) src1->data;
-    float       *  dst_d      = (float *) dst->data;
-
-    const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
-    const int64_t s01 = src0->nb[1] / ts_src0;
-    const int64_t s1  =  dst->nb[1] / ts_dst;
-    const int64_t s02 = src0->nb[2] / ts_src0;
-    const int64_t s2  =  dst->nb[2] / ts_dst;
-    const int64_t s03 = src0->nb[3] / ts_src0;
-    const int64_t s3  =  dst->nb[3] / ts_dst;
-
-    const bool fallback = ne01 % 128 != 0;
-
-    const size_t y_block_size       = sizeof(block_q8_1_mmq);
-    const size_t y_values_per_block = QK8_1_MMQ;
-
-    // Quantize activations to Q8_1 (shared between up and gate)
-    const size_t nbytes_src1_q8_1 = ne13 * ne12 * ne11 * ne10_padded * y_block_size / y_values_per_block +
-        ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11) * sizeof(block_q8_1_mmq);
-    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), nbytes_src1_q8_1);
-
-    {
-        const int64_t s11 = src1->nb[1] / ts_src1;
-        const int64_t s12 = src1->nb[2] / ts_src1;
-        const int64_t s13 = src1->nb[3] / ts_src1;
-        quantize_mmq_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded,
-                               ne11, ne12, ne13, stream);
-        CUDA_CHECK(cudaGetLastError());
-    }
-
-    const int64_t s12 = ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
-    const int64_t s13 = ne12 * s12;
-
-    mmq_args args;
-    args.x = src0_d;
-    args.type_x = src0->type;
-    args.y = (const int *) src1_q8_1.ptr;
-    args.ids_dst = nullptr;
-    args.expert_bounds = nullptr;
-    args.dst = dst_d;
-    args.y_scale = nullptr;
-    args.ncols_x = ne00; args.nrows_x = ne01; args.ncols_dst = ne1; args.stride_row_x = s01;
-    args.ncols_y = ne11; args.nrows_dst = s1;
-    args.nchannels_x = ne02; args.nchannels_y = ne12; args.stride_channel_x = s02; args.stride_channel_y = s12; args.stride_channel_dst = s2;
-    args.nsamples_x = ne03; args.nsamples_y = ne13; args.stride_sample_x = s03; args.stride_sample_y = s13; args.stride_sample_dst = s3;
-    args.ncols_max = ne1;
-    args.ncols_opt = ne1;
-    args.x_gate = src0_gate_d;
-    args.glu_op = glu_op;
-    args.glu_limit = glu_limit;
-    args.fused_glu = true;
-
-    ggml_cuda_mul_mat_q_fused_switch_type(ctx, args, stream);
-}
+        ggml_glu_op glu_op, float glu_limit);
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts);
 
