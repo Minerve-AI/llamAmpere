@@ -4408,6 +4408,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                         if (gate_n_3->src[0] && !ids_3 &&
                                 src0_3->type == gate_n_3->src[0]->type &&
                                 ggml_is_quantized(src0_3->type) &&
+                                (src0_3->type == GGML_TYPE_Q4_K || src0_3->type == GGML_TYPE_Q8_0) &&
                                 src1_3->type == GGML_TYPE_F32 &&
                                 cgraph->nodes[glu_idx_3]->type == GGML_TYPE_F32 &&
                                 src1_3->ne[1] > 1 &&
@@ -4509,6 +4510,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 if (fusion_data.gate && !ids &&
                         src0->type == fusion_data.gate->type &&
                         ggml_is_quantized(src0->type) &&
+                        (src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q8_0) &&
                         src1->type == GGML_TYPE_F32 &&
                         cgraph->nodes[glu_idx]->type == GGML_TYPE_F32 &&
                         src1->ne[1] > 1 &&
