@@ -4384,6 +4384,48 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         const ggml_op bias_op = op == GGML_OP_MUL_MAT ? GGML_OP_ADD : GGML_OP_ADD_ID;
 
         if (op == GGML_OP_MUL_MAT) {
+            // 3-op pattern: MUL_MAT, MUL_MAT, GLU (no scales, no bias) — standard FFN
+            {
+                const int gate_idx_3 = i;
+                const int up_idx_3   = i + 1;
+                const int glu_idx_3  = i + 2;
+
+                ggml_op ops_3[] = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU };
+                const int out_nodes_3[] = { glu_idx_3 };
+
+                if (ggml_can_fuse_subgraph(cgraph, i, 3, ops_3, out_nodes_3, 1) &&
+                        ggml_cuda_check_fusion_memory_ranges(cgraph, i, 3, out_nodes_3, 1)) {
+
+                    ggml_tensor * gate_n_3 = cgraph->nodes[gate_idx_3];
+                    ggml_tensor * up_n_3   = cgraph->nodes[up_idx_3];
+                    const ggml_tensor * glu_3 = cgraph->nodes[glu_idx_3];
+
+                    if (ggml_cuda_should_fuse_mul_mat(up_n_3, gate_n_3, glu_3)) {
+                        const ggml_tensor * src0_3 = up_n_3->src[0];
+                        const ggml_tensor * src1_3 = up_n_3->src[1];
+                        const ggml_tensor * ids_3  = up_n_3->src[2];
+
+                        if (gate_n_3->src[0] && !ids_3 &&
+                                src0_3->type == gate_n_3->src[0]->type &&
+                                ggml_is_quantized(src0_3->type) &&
+                                src1_3->type == GGML_TYPE_F32 &&
+                                cgraph->nodes[glu_idx_3]->type == GGML_TYPE_F32 &&
+                                src1_3->ne[1] > 1 &&
+                                src0_3->type != GGML_TYPE_Q8_CR && src0_3->type != GGML_TYPE_Q5_CR && src0_3->type != GGML_TYPE_Q6_CR &&
+                                ggml_cuda_should_use_mmq(src0_3->type, ggml_cuda_info().devices[ggml_cuda_get_device()].cc, src1_3->ne[1], 0)) {
+                            ggml_cuda_mul_mat_q_fused_glu(*cuda_ctx, src0_3, src1_3, gate_n_3->src[0], cgraph->nodes[glu_idx_3],
+                                ggml_get_glu_op(glu_3), ggml_get_op_params_f32(glu_3, 3));
+                            fused_mul_mat_vec = true;
+                            fused_node_count  = 3;
+                        }
+                    }
+                }
+            }
+
+            if (fused_mul_mat_vec) {
+                break;
+            }
+
             for (const bool with_bias : { false, true }) {
                 const int gate_idx       = i;
                 const int gate_scale_idx = i + 1;
