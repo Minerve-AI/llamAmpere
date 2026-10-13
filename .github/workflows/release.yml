@@ -80,6 +80,7 @@ jobs:
             -DGGML_CPU=ON ^
             -DGGML_CUDA=ON ^
             -DCMAKE_CUDA_ARCHITECTURES=86 ^
+            -DGGML_CUDA_FUSED_J="64,128" ^
             -DLLAMA_BUILD_SERVER=ON ^
             -DLLAMA_BUILD_TESTS=OFF ^
             -DLLAMA_BUILD_EXAMPLES=ON ^
