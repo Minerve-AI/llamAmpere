@@ -164,14 +164,24 @@ static __device__ __forceinline__ void mul_mat_q_process_tile_fused(
         __syncthreads();
     }
 
-    // Write-back with GLU
+    // Write-back
     if (fixup) {
-        // Write to fixup buffer: first J*I floats = sum_up, next J*I = sum_gate
-        // The fixup kernel will combine and apply GLU
-        ggml_cuda_mmq_write_back_fused_glu<type, J, fallback>(
-            sum, sum_gate, ids_dst, tmp_fixup, y_scale, 2 * I, I, J, glu_op, glu_limit);
-        // Note: for fixup, stride is 2*I because the fixup buffer stores [sum_up | sum_gate] per tile
-        // The fixup kernel handles the combination.
+        // Write RAW partial sums to fixup buffer (NO GLU - fixup kernel applies it after combining)
+        // Layout per block: [sum_up (J*I floats) | sum_gate (J*I floats)]
+        constexpr int nwarps_fb = ggml_cuda_mmq_get_nthreads(type, J, fallback) / ggml_cuda_get_physical_warp_size();
+        constexpr int ws_fb     = ggml_cuda_get_physical_warp_size();
+        float * fixup_ptr = tmp_fixup + blockIdx.x * 2 * J * I;
+        #pragma unroll
+        for (int j0 = 0; j0 < J; j0 += nwarps_fb) {
+            const int j = j0 + threadIdx.y;
+            #pragma unroll
+            for (int i0 = 0; i0 < I; i0 += ws_fb) {
+                const int i = i0 + threadIdx.x;
+                const int idx = (j0 / nwarps_fb) * (I / ws_fb) + i0 / ws_fb;
+                fixup_ptr[j * I + i]         = sum[idx];
+                fixup_ptr[J * I + j * I + i] = sum_gate[idx];
+            }
+        }
     } else {
         ggml_cuda_mmq_write_back_fused_glu<type, J, fallback>(
             sum, sum_gate, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j, glu_op, glu_limit);
