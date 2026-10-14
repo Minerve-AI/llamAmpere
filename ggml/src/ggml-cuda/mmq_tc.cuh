@@ -234,7 +234,7 @@ __device__ __forceinline__ void dequant_q80_32(
     const __half d,      // scale (single value)
     __half2 out[16])     // 16 x half2 = 32 halves output
 {
-    const __half hs = __half2half2(d);
+    const __half2 hs = __half2half2(d);
 
     // Process 4 values at a time into half2 pairs
     for (int i = 0; i < 32; i += 4) {
