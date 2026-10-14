@@ -5,6 +5,10 @@
 
 #include "ggml-cuda/allreduce.cuh"
 #include "ggml-cuda/common.cuh"
+
+// Forward declarations for tensor-core GEMM kernel (mmq_tc.cu)
+void ggml_cuda_mul_mat_tc(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+void ggml_cuda_convert_act_hperm(ggml_backend_cuda_context & ctx, const ggml_tensor * src, ggml_tensor * dst);
 #include "ggml-cuda/moe-cache.cuh"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
@@ -2135,6 +2139,28 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
         return;
     }
+    // Tensor-core GEMM path for prefill (batch >= 128) with Q4_K / Q8_0 weights on sm_86+.
+    // Converts the FP32 activation to FP16 (hperm) in a temporary pool buffer, then runs the
+    // tensor-core kernel. Falls back to MMQ below when any condition is not met.
+    if (ne11 >= 128
+            && (src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q8_0)
+            && src1->type == GGML_TYPE_F32
+            && dst->type == GGML_TYPE_F32
+            && cc >= 860
+            && src0->ne[0] % 64 == 0
+            && src0->ne[1] % 128 == 0
+            && ne2 == 1 && ne3 == 1
+            && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)) {
+        const int64_t ne10 = src1->ne[0];
+        ggml_cuda_pool_alloc<__half> tmp_buf(ctx.pool(), (size_t)ne10 * (size_t)ne11);
+        ggml_tensor tmp = *src1;
+        tmp.type = GGML_TYPE_F16;
+        tmp.data = tmp_buf.get();
+        ggml_cuda_convert_act_hperm(ctx, src1, &tmp);
+        ggml_cuda_mul_mat_tc(ctx, src0, &tmp, dst);
+        return;
+    }
+
     if (ggml_cuda_should_use_mmq(src0->type, cc, ne11, /*n_experts =*/ 0)) {
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
         return;
