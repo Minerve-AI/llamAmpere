@@ -9,8 +9,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 860
-
 namespace tc {
 
 // ============================================================================
@@ -325,7 +323,5 @@ __device__ __forceinline__ int stage_idx(int iter, int p) {
 }
 
 } // namespace tc
-
-#endif // __CUDA_ARCH__ >= 860
 
 #endif // GGML_CUDA_MMQ_TC_CUH
