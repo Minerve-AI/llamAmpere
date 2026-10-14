@@ -21,8 +21,6 @@
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
 
-namespace tc = mmq_tc;
-
 // ============================================================================
 // Dequant helpers
 // ============================================================================
@@ -259,18 +257,23 @@ mul_mat_q_tc_kernel(
 
             #pragma unroll
             for (int kl = 0; kl < BK / 16; kl++) {
+                float c0 = c_acc[nt][0], c1 = c_acc[nt][1];
+                float c2 = c_acc[nt][2], c3 = c_acc[nt][3];
+                unsigned a0 = a_frag[kl][0], a1 = a_frag[kl][1];
+                unsigned a2 = a0 >> 16, a3 = a1 >> 16;
+                unsigned b0 = b_frag[0], b1 = b_frag[1];
                 asm volatile(
                     "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                     "{%0, %1, %2, %3}, "
                     "{%4, %5, %6, %7}, "
                     "{%8, %9}, "
                     "{%0, %1, %2, %3};\n"
-                    : "+f"(c_acc[nt][0]), "+f"(c_acc[nt][1]),
-                      "+f"(c_acc[nt][2]), "+f"(c_acc[nt][3])
-                    : "r"(a_frag[kl][0]), "r"(a_frag[kl][1]),
-                      "r"(a_frag[kl][0] >> 16), "r"(a_frag[kl][1] >> 16),
-                      "r"(b_frag[0]), "r"(b_frag[1])
+                    : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+                      "r"(b0), "r"(b1)
                 );
+                c_acc[nt][0] = c0; c_acc[nt][1] = c1;
+                c_acc[nt][2] = c2; c_acc[nt][3] = c3;
             }
         }
 
