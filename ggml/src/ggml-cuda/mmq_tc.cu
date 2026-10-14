@@ -1,273 +1,346 @@
-#include "common.cuh"
-#include "mmq_tc.cuh"
-#include "ggml-cuda/common.h"
+// mmq_tc.cu - Tensor core GEMM kernel for prefill (V1)
+//
+// Supports: Q4_K (144B/block, 256 vals), Q8_0 (34B/block, 32 vals)
+// Tile: BM=128 rows x BN=128 tokens, BK=64, NSH=4 stages
+// 8 warps (256 threads), each warp handles 16 rows
+// MMA: m16n8k16.f16 (tensor cores, sm_86+)
+//
+// Weight smem layout (per row per stage):
+//   Q4_K: 48B = [d 2B][dmin 2B][scales 12B][qs 32B]
+//   Q8_0: 68B = [d0 2B][qs0 32B][d1 2B][qs1 32B]
+//
+// Dequant: direct to MMA A-fragment registers (no intermediate buffer)
+// Activation: FP16 hperm, cp.async into a_smem[stage][tok][k]
+//
+// Shared memory budget:
+//   Q4_K: 4*128*48 + 4*128*64*2 = 24KB + 64KB = 88KB < 99KB
+//   Q8_0: 4*128*68 + 4*128*64*2 = 34KB + 64KB = 98KB < 99KB
+
+#include "ggml-cuda/common.cuh"
+#include "ggml-cuda/mmq_tc.cuh"
+#include <cuda_fp16.h>
+#include <cuda_pipeline.h>
+
+namespace tc = mmq_tc;
 
 // ============================================================================
-// Tensor Core GEMM kernel for prefill (batch >= 128)
-//
-// Y[tok][row] = sum_k W[row][k] * X[tok][k]
-//
-// W: quantized weights (Q4_K, Q8_0) in GGUF layout
-// X: FP16 activations in hperm order, shape [K, ntok] col-major
-// Y: FP32 output, shape [N, ntok] col-major
-//
-// Tile: BM=128 rows x BN=128 tokens per CTA, 8 warps, BK=64
-// MMA: m16n8k16.row.col.f16
-// Pipeline: cp.async, NSH=4 stages
+// Dequant helpers
 // ============================================================================
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 860
+// Extract 6-bit scale and 6-bit min from the Q4_K scales array
+__device__ __forceinline__ void get_scale_min_k4(int j, const uint8_t * q, uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 8] & 0xF) | ((q[j - 4] >> 6) << 4);
+    }
+}
 
-// Q4_K: block size 144 bytes covers 256 K values (qk4_k=256)
-// Per 32 K values per row: 144/8 = 18 bytes (2 sub-blocks of 16 vals)
-// For BK=64: 2 sub-blocks = 36 bytes... but we use STAGE_BYTES from .cuh
-//
-// Simplified approach for V1:
-// - Load raw weight bytes into smem
-// - Dequantize in registers to FP16
-// - Use MMA for the GEMM
-// - The exact GGUF offset is computed per row/stage
+// ============================================================================
+// Main kernel
+// ============================================================================
 
 template <int WTYPE>
-__global__ void __launch_bounds__(tc::NTHREADS) mul_mat_q_tc(
-    const uint8_t * __restrict__ w,
-    const __half * __restrict__ x,
-    float * __restrict__ y,
-    int K, int N, int ntok)
+__global__ void __launch_bounds__(tc::NTHREADS)
+mul_mat_q_tc_kernel(
+    const uint8_t * __restrict__ W,   // quantized weights [N, K] row-major
+    const __half  * __restrict__ A,   // FP16 hperm activations [K, ntok] col-major
+    float         * __restrict__ C,   // output [N, ntok] col-major (FP32)
+    int N, int K, int ntok)
 {
-    constexpr int BM_ = tc::BM;
-    constexpr int BN_ = tc::BN;
-    constexpr int BK_ = tc::BK;
-    constexpr int NSH_ = tc::NSH;
-    constexpr int HCH_ = tc::HCH;
-    constexpr int STAGE_B = tc::WType<WTYPE>::STAGE_BYTES;
-    constexpr int W_STAGE = BM_ * STAGE_B;
-    constexpr int A_STAGE = BN_ * BK_ * 2; // bytes
+    constexpr int BM    = tc::BM;     // 128
+    constexpr int BN    = tc::BN;     // 128
+    constexpr int BK    = tc::BK;     // 64
+    constexpr int NSH   = tc::NSH;    // 4
+    constexpr int WSTAGE = tc::WType<WTYPE>::STAGE_BYTES;
 
-    extern __shared__ uint8_t smem[];
-    uint8_t  * w_smem = smem;
-    __half   * a_smem = reinterpret_cast<__half *>(smem + NSH_ * W_STAGE);
+    // Shared memory layout: [weights: NSH*BM*WSTAGE][activations: NSH*BN*BK*2]
+    extern __shared__ uint8_t smem_raw[];
+    uint8_t * w_smem = smem_raw;
+    __half  * a_smem = reinterpret_cast<__half*>(smem_raw + NSH * BM * WSTAGE);
 
-    const int row0 = blockIdx.x * BM_;
-    const int tok0 = blockIdx.y * BN_;
-    const int tid  = threadIdx.x;
-    const int warp = tid / 32;
-    const int lane = tid % 32;
-    const int nstages = K / BK_;
+    const int tid   = threadIdx.x;
+    const int warp  = tid / 32;
+    const int lane  = tid % 32;
+    const int block_row  = blockIdx.x * BM;
+    const int block_tok  = blockIdx.y * BN;
+    const int n_tiles_k  = K / BK;
 
-    // FP32 accumulators: 16 N-tiles x 4 regs
-    float acc[16][4];
-    #pragma unroll
-    for (int n = 0; n < 16; n++)
-        #pragma unroll
-        for (int k = 0; k < 4; k++)
-            acc[n][k] = 0.0f;
+    // MMA fragment positions for this thread:
+    // A fragment (m16n8k16): row = warp*16 + lane/4, K = kt*16 + (lane%4)*2 + {0,1}
+    //                        row = warp*16 + 8 + lane/4, same K
+    const int rA = warp * 16 + lane / 4;       // first row
+    const int rB = rA + 8;                      // second row
+    const int kpos = (lane % 4) * 2;           // K position within 16-tile
 
-    // === Weight load: 2 threads per row, each loads STAGE_B/2 bytes ===
-    auto load_w = [&](int stage) {
-        const int s = stage % NSH_;
-        const int r = tid / 2;
-        const int h = tid % 2;
-        if (r >= BM_) return;
-        // Global offset: row r of the tile, K offset = stage * BK
-        // Simplified: assume row-major uint8_t layout
-        const uint8_t * src = w + (size_t)(row0 + r) * (K / 2) + stage * BK / 2 + h * (STAGE_B / 2);
-        uint8_t * dst = w_smem + s * W_STAGE + r * STAGE_B + h * (STAGE_B / 2);
-        // Load in 16-byte chunks
-        const int nchunks = (STAGE_B / 2) / 16;
-        #pragma unroll
-        for (int c = 0; c < nchunks; c++) {
-            unsigned s_addr = __cvta_generic_to_shared(dst + c * 16);
-            tc::cpa16(s_addr, src + c * 16);
-        }
-    };
+    // ========================================================================
+    // cp.async load lambda
+    // ========================================================================
 
-    // === Activation load: 256 threads, each loads A_STAGE/256 bytes ===
-    auto load_a = [&](int stage) {
-        const int s = stage % NSH_;
-        const int bytes_per_thread = A_STAGE / tc::NTHREADS; // 64 bytes
-        const int nchunks = bytes_per_thread / 16;           // 4 chunks
-        // Global: x is [K, ntok] col-major, hperm order
-        // For stage (k0 = stage*BK), load BK halves per token
-        const __half * src = x + (size_t)(tok0) * K + stage * BK;
-        __half * dst = a_smem + s * BN_ * BK_;
-        // Each thread loads 4 chunks of 16 bytes (8 halves each)
-        // Layout: thread tid loads data for tokens starting at tid*2
-        #pragma unroll
-        for (int c = 0; c < nchunks; c++) {
-            const int offset = tid * bytes_per_thread + c * 16;
-            const int tok = offset / (BK_ * 2);      // which token
-            const int koff = (offset % (BK_ * 2)) / 2; // which K within token
-            if (tok < BN_) {
-                unsigned s_addr = __cvta_generic_to_shared(dst + tok * BK_ + koff);
-                const __half * gsrc = x + (size_t)(tok0 + tok) * K + stage * BK_ + koff;
-                tc::cpa16(s_addr, gsrc);
-            }
-        }
-    };
+    auto load_stage = [&](int stage, int kt) {
+        if (kt >= n_tiles_k) return;
+        const int k0 = kt * BK;
 
-    // === Pipeline prologue: prefetch NSH-1 stages ===
-    #pragma unroll
-    for (int s = 0; s < NSH_ - 1; s++) {
-        if (s < nstages) {
-            load_w(s);
-            load_a(s);
-        }
-        tc::cpa_commit();
-    }
-
-    // === Main loop ===
-    for (int stage = 0; stage < nstages; stage++) {
-        const int s = stage % NSH_;
-
-        // Wait for current stage
-        tc::cpa_wait<NSH_ - 2>();
-        __syncthreads();
-
-        // --- Dequantize weights and compute A fragments ---
-        // Each warp: 16 rows, each thread pair handles 1 row
-        // Per thread: 32 K values (half of BK=64) = 2 groups of 16
-        // A fragments: 2 K-tiles x 4 regs = 8 regs
-
-        unsigned a_frag[2][4];
+        // --- Weights ---
         {
-            const int r = warp * 16 + (lane / 2); // row within warp
-            const int half = lane % 2;
-            const uint8_t * wptr = w_smem + s * W_STAGE + r * STAGE_B + half * (STAGE_B / 2);
+            const int r  = tid / 2;
+            const int h  = tid % 2;
+            const int row = block_row + r;
 
-            if constexpr (WTYPE == tc::TQ4K) {
-                // Dequantize 32 K values (2 groups of 16)
-                // Group 0: bytes 16..23 (8 bytes of 4-bit values)
-                // Group 1: bytes 24..31 (8 bytes of 4-bit values)
-                // Scale from header (bytes 0..15)
-                __half2 scale = __floats2half2_rn(1.0f, 1.0f); // TODO: read actual scale
-                __half2 out[8];
-                // Group 0
-                tc::dequant_q4k_16(wptr + 16, scale, out);
-                a_frag[0][0] = *reinterpret_cast<unsigned *>(&out[0]);
-                a_frag[0][1] = *reinterpret_cast<unsigned *>(&out[1]);
-                a_frag[0][2] = *reinterpret_cast<unsigned *>(&out[2]);
-                a_frag[0][3] = *reinterpret_cast<unsigned *>(&out[3]);
-                // Group 1
-                tc::dequant_q4k_16(wptr + 24, scale, out);
-                a_frag[1][0] = *reinterpret_cast<unsigned *>(&out[0]);
-                a_frag[1][1] = *reinterpret_cast<unsigned *>(&out[1]);
-                a_frag[1][2] = *reinterpret_cast<unsigned *>(&out[2]);
-                a_frag[1][3] = *reinterpret_cast<unsigned *>(&out[3]);
-            } else if constexpr (WTYPE == tc::TQ80) {
-                // Q8_0: 32 int8 values, scale from last 4 bytes
-                __half2 scale = __floats2half2_rn(1.0f, 1.0f); // TODO: read actual scale
-                __half2 out[8];
-                tc::dequant_q80_32(wptr + 16, scale, out);
-                a_frag[0][0] = *reinterpret_cast<unsigned *>(&out[0]);
-                a_frag[0][1] = *reinterpret_cast<unsigned *>(&out[1]);
-                a_frag[0][2] = *reinterpret_cast<unsigned *>(&out[2]);
-                a_frag[0][3] = *reinterpret_cast<unsigned *>(&out[3]);
-                tc::dequant_q80_32(wptr + 24, scale, out);
-                a_frag[1][0] = *reinterpret_cast<unsigned *>(&out[0]);
-                a_frag[1][1] = *reinterpret_cast<unsigned *>(&out[1]);
-                a_frag[1][2] = *reinterpret_cast<unsigned *>(&out[2]);
-                a_frag[1][3] = *reinterpret_cast<unsigned *>(&out[3]);
+            if (row < N) {
+                uint8_t * dst = w_smem + stage * BM * WSTAGE + r * WSTAGE;
+
+                if constexpr (WTYPE == tc::TQ4K) {
+                    const int bidx  = k0 / 256;
+                    const int koff  = k0 % 256;
+                    const uint8_t * g = W + (size_t)row * (K / 256) * 144 + bidx * 144;
+
+                    if (h == 0) {
+                        __pipeline_memcpy_async(dst + 0,  g + 0,   4);   // d + dmin
+                        __pipeline_memcpy_async(dst + 4,  g + 132, 12);  // scales
+                        __pipeline_memcpy_async(dst + 16, g + 4 + koff/2,     16);
+                        __pipeline_memcpy_async(dst + 32, g + 4 + koff/2 + 16, 16);
+                    } else {
+                        __pipeline_memcpy_async(dst + 32, g + 4 + koff/2 + 16, 16);
+                    }
+                } else {
+                    // Q8_0: 2 blocks of 34B
+                    const uint8_t * g0 = W + (size_t)row * (K / 32) * 34 + (k0 / 32) * 34;
+                    const uint8_t * g1 = g0 + 34;
+
+                    if (h == 0) {
+                        __pipeline_memcpy_async(dst + 0,  g0,     16);
+                        __pipeline_memcpy_async(dst + 16, g0 + 16, 16);
+                        *reinterpret_cast<uint16_t*>(dst + 32) =
+                            *reinterpret_cast<const uint16_t*>(g0 + 32);
+                    } else {
+                        __pipeline_memcpy_async(dst + 34, g1,     16);
+                        __pipeline_memcpy_async(dst + 50, g1 + 16, 16);
+                        *reinterpret_cast<uint16_t*>(dst + 66) =
+                            *reinterpret_cast<const uint16_t*>(g1 + 32);
+                    }
+                }
             }
         }
 
-        // --- Load B fragments and MMA accumulate ---
-        const __half * a_base = a_smem + s * BN_ * BK_;
+        // --- Activations ---
+        {
+            __half * dst = a_smem + stage * BN * BK;
+            const __half * g = A + k0;
+            const int tok0  = block_tok + tid / 2;
+            const int koff  = (tid % 2) * 32;
+            if (tok0 < block_tok + BN && tok0 < ntok) {
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    __pipeline_memcpy_async(
+                        dst + (tok0 - block_tok) * BK + koff + i * 16,
+                        g + (size_t)tok0 * K + koff + i * 16, 16);
+                }
+            }
+        }
+
+        __pipeline_commit();
+    };
+
+    #pragma unroll
+    for (int s = 0; s < NSH - 1; s++)
+        load_stage(s, s);
+
+    // ========================================================================
+    // Main loop
+    // ========================================================================
+
+    float c_acc[BN/8][4];
+    #pragma unroll
+    for (int i = 0; i < BN/8; i++)
         #pragma unroll
-        for (int n = 0; n < 16; n++) {
-            // Load B fragment: 16x8, 2 regs per thread
-            unsigned b[2];
-            {
-                // ldmatrix from smem: B is col-major [BK, BN]
-                // For N-tile n: tokens tok0 + n*8 .. tok0 + n*8+7
-                // K range: 16 values (one K-tile)
-                const int tok = n * 8 + (lane % 8);
-                const int k0 = (lane / 8) * 2;
-                unsigned addr = __cvta_generic_to_shared(a_base + tok * BK_ + k0);
-                tc::ldsm_x2(b, addr);
-            }
-            // K-tile 0
-            tc::mma_16816(acc[n][0], acc[n][1], acc[n][2], acc[n][3],
-                          a_frag[0][0], a_frag[0][1], a_frag[0][2], a_frag[0][3],
-                          b[0], b[1]);
-        }
-        // K-tile 1 (next 16 K values)
-        #pragma unroll
-        for (int n = 0; n < 16; n++) {
-            unsigned b[2];
-            {
-                const int tok = n * 8 + (lane % 8);
-                const int k0 = 16 + (lane / 8) * 2;
-                unsigned addr = __cvta_generic_to_shared(a_base + tok * BK_ + k0);
-                tc::ldsm_x2(b, addr);
-            }
-            tc::mma_16816(acc[n][0], acc[n][1], acc[n][2], acc[n][3],
-                          a_frag[1][0], a_frag[1][1], a_frag[1][2], a_frag[1][3],
-                          b[0], b[1]);
-        }
+        for (int j = 0; j < 4; j++)
+            c_acc[i][j] = 0.0f;
 
-        // Prefetch next stage
-        if (stage + NSH_ - 1 < nstages) {
-            load_w(stage + NSH_ - 1);
-            load_a(stage + NSH_ - 1);
-        }
-        tc::cpa_commit();
+    for (int kt = 0; kt < n_tiles_k; kt++) {
+        const int s = kt % NSH;
+
+        __pipeline_wait_prior(NSH - 2);
         __syncthreads();
+
+        const int k0 = kt * BK;
+
+        // --- Dequantize weights directly to A-fragment registers ---
+        unsigned a_frag[4][2];
+
+        if constexpr (WTYPE == tc::TQ4K) {
+            const uint8_t * wA = w_smem + s * BM * WSTAGE + rA * WSTAGE;
+            const uint8_t * wB = w_smem + s * BM * WSTAGE + rB * WSTAGE;
+
+            const float d    = __half2float(*reinterpret_cast<const __half*>(wA));
+            const float dmin = __half2float(*reinterpret_cast<const __half*>(wA + 2));
+            const uint8_t * scalesA = wA + 4;
+            const uint8_t * qsA     = wA + 16;
+            const uint8_t * qsB     = wB + 16;
+
+            const int koff = k0 % 256;
+
+            #pragma unroll
+            for (int kl = 0; kl < BK / 16; kl++) {
+                const int k_global = koff + kl * 16 + kpos;
+                const int sb = k_global / 32;
+
+                uint8_t sc, m;
+                get_scale_min_k4(sb, scalesA, &sc, &m);
+                const float d_eff  = d * (float)sc;
+                const float m_eff  = dmin * (float)m;
+
+                const int qidx = (kl * 16 + kpos) / 2;
+
+                const uint8_t byteA = qsA[qidx];
+                __half hA0 = __float2half_rn(d_eff * (float)(byteA & 0xF) - m_eff);
+                __half hA1 = __float2half_rn(d_eff * (float)(byteA >> 4) - m_eff);
+
+                const uint8_t byteB = qsB[qidx];
+                __half hB0 = __float2half_rn(d_eff * (float)(byteB & 0xF) - m_eff);
+                __half hB1 = __float2half_rn(d_eff * (float)(byteB >> 4) - m_eff);
+
+                a_frag[kl][0] = *reinterpret_cast<unsigned*>(&hA0) |
+                                ((*reinterpret_cast<unsigned*>(&hA1)) << 16);
+                a_frag[kl][1] = *reinterpret_cast<unsigned*>(&hB0) |
+                                ((*reinterpret_cast<unsigned*>(&hB1)) << 16);
+            }
+        } else {
+            // Q8_0
+            const uint8_t * wA = w_smem + s * BM * WSTAGE + rA * WSTAGE;
+            const uint8_t * wB = w_smem + s * BM * WSTAGE + rB * WSTAGE;
+
+            const int koff = k0 % 64;
+
+            #pragma unroll
+            for (int kl = 0; kl < BK / 16; kl++) {
+                const int k_global = koff + kl * 16 + kpos;
+                const int blk = k_global / 32;
+                const int off = k_global % 32;
+
+                const float dA = __half2float(*reinterpret_cast<const __half*>(wA + blk * 34));
+                const float dB = __half2float(*reinterpret_cast<const __half*>(wB + blk * 34));
+
+                const int8_t qA0 = *reinterpret_cast<const int8_t*>(wA + blk * 34 + 2 + off);
+                const int8_t qA1 = *reinterpret_cast<const int8_t*>(wA + blk * 34 + 2 + off + 1);
+                const int8_t qB0 = *reinterpret_cast<const int8_t*>(wB + blk * 34 + 2 + off);
+                const int8_t qB1 = *reinterpret_cast<const int8_t*>(wB + blk * 34 + 2 + off + 1);
+
+                __half hA0 = __float2half_rn(dA * (float)qA0);
+                __half hA1 = __float2half_rn(dA * (float)qA1);
+                __half hB0 = __float2half_rn(dB * (float)qB0);
+                __half hB1 = __float2half_rn(dB * (float)qB1);
+
+                a_frag[kl][0] = *reinterpret_cast<unsigned*>(&hA0) |
+                                ((*reinterpret_cast<unsigned*>(&hA1)) << 16);
+                a_frag[kl][1] = *reinterpret_cast<unsigned*>(&hB0) |
+                                ((*reinterpret_cast<unsigned*>(&hB1)) << 16);
+            }
+        }
+
+        // --- B fragments (activations) and MMA ---
+        __half * a_stage = a_smem + s * BN * BK;
+
+        #pragma unroll
+        for (int nt = 0; nt < BN / 8; nt++) {
+            unsigned b_frag[2];
+            {
+                const int tok = nt * 8 + (lane % 8);
+                const int k0b = (lane / 8) * 8;
+                unsigned addr = __cvta_generic_to_shared(a_stage + tok * BK + k0b);
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+                    : "=r"(b_frag[0]), "=r"(b_frag[1])
+                    : "r"(addr)
+                );
+            }
+
+            #pragma unroll
+            for (int kl = 0; kl < BK / 16; kl++) {
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0, %1, %2, %3}, "
+                    "{%4, %5, %6, %7}, "
+                    "{%8, %9}, "
+                    "{%0, %1, %2, %3};\n"
+                    : "+f"(c_acc[nt][0]), "+f"(c_acc[nt][1]),
+                      "+f"(c_acc[nt][2]), "+f"(c_acc[nt][3])
+                    : "r"(a_frag[kl][0]), "r"(a_frag[kl][1]),
+                      "r"(a_frag[kl][0] >> 16), "r"(a_frag[kl][1] >> 16),
+                      "r"(b_frag[0]), "r"(b_frag[1])
+                );
+            }
+        }
+
+        __syncthreads();
+        load_stage((kt + NSH - 1) % NSH, kt + NSH - 1);
     }
 
-    // === Epilogue: write FP32 accumulators to global memory ===
-    const int row = row0 + warp * 16 + (lane / 2);
+    // ========================================================================
+    // Epilogue: write C [N, ntok] col-major
+    // ========================================================================
+    const int row0 = block_row + rA;
+    const int row1 = block_row + rB;
+    const int col_base = kpos;
+
     #pragma unroll
-    for (int n = 0; n < 16; n++) {
-        const int tok = tok0 + n * 8 + (lane % 8);
-        if (tok < ntok) {
-            y[(size_t)row * ntok + tok] = acc[n][0];
-            y[(size_t)(row + 8) * ntok + tok] = acc[n][1];
+    for (int nt = 0; nt < BN / 8; nt++) {
+        const int col0 = block_tok + nt * 8 + col_base;
+        if (row0 < N) {
+            C[(size_t)col0 * N + row0]       = c_acc[nt][0];
+            C[(size_t)(col0 + 1) * N + row0] = c_acc[nt][1];
+        }
+        if (row1 < N) {
+            C[(size_t)col0 * N + row1]       = c_acc[nt][2];
+            C[(size_t)(col0 + 1) * N + row1] = c_acc[nt][3];
         }
     }
 }
 
-#endif // __CUDA_ARCH__ >= 860
-
 // ============================================================================
-// Host launch function
+// Host function
 // ============================================================================
 
 void ggml_cuda_mul_mat_tc(ggml_backend_cuda_context & ctx,
-                          const ggml_tensor * src0, const ggml_tensor * src1,
-                          ggml_tensor * dst)
-{
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    if (cc < 860) return;
+                           const ggml_tensor * src0,
+                           const ggml_tensor * src1,
+                           ggml_tensor * dst) {
+    const int64_t N    = src0->ne[1];
+    const int64_t K    = src0->ne[0];
+    const int64_t ntok = src1->ne[1];
 
-    GGML_TENSOR_BINARY_OP_LOCALS;
+    GGML_ASSERT(N % tc::BM == 0);
+    GGML_ASSERT(ntok % tc::BN == 0);
+    GGML_ASSERT(K % tc::BK == 0);
 
-    const int64_t K = ne00;
-    const int64_t N = ne01;
-    const int64_t ntok = ne11;
+    const uint8_t * W_d = (const uint8_t *) src0->data;
+    const __half  * A_d = (const __half *) src1->data;
+    float         * C_d = (float *) dst->data;
 
-    if (K % tc::BK != 0 || N % tc::BM != 0) return;
-
-    const void * wdata = ggml_backend_cuda_get_buffer_read_ptr(src0);
-    const void * xdata = ggml_backend_cuda_get_buffer_read_ptr(src1);
-    void *       ydata = ggml_backend_cuda_get_buffer_write_ptr(dst);
-
-    const int smem_bytes = tc::NSH * tc::BM * tc::WType<GGML_TYPE_Q4_K>::STAGE_BYTES
-                         + tc::NSH * tc::BN * tc::BK * 2;
-
-    dim3 block(tc::NTHREADS);
-    dim3 grid(N / tc::BM, (ntok + tc::BN - 1) / tc::BN);
+    const dim3 grid(N / tc::BM, ntok / tc::BN);
+    const dim3 block(tc::NTHREADS);
+    cudaStream_t stream = ctx.stream();
 
     switch (src0->type) {
-        case GGML_TYPE_Q4_K:
-            GGML_CUDA_KERNEL(mul_mat_q_tc<tc::TQ4K>, grid, block, smem_bytes,
-                wdata, xdata, ydata, K, N, ntok);
+        case GGML_TYPE_Q4_K: {
+            constexpr size_t smem = tc::NSH * tc::BM * tc::WType<tc::TQ4K>::STAGE_BYTES
+                                  + tc::NSH * tc::BN * tc::BK * sizeof(__half);
+            auto & kern = mul_mat_q_tc_kernel<tc::TQ4K>;
+            cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+            kern<<<grid, block, smem, stream>>>(W_d, A_d, C_d, (int)N, (int)K, (int)ntok);
             break;
-        case GGML_TYPE_Q8_0:
-            GGML_CUDA_KERNEL(mul_mat_q_tc<tc::TQ80>, grid, block, smem_bytes,
-                wdata, xdata, ydata, K, N, ntok);
+        }
+        case GGML_TYPE_Q8_0: {
+            constexpr size_t smem = tc::NSH * tc::BM * tc::WType<tc::TQ80>::STAGE_BYTES
+                                  + tc::NSH * tc::BN * tc::BK * sizeof(__half);
+            auto & kern = mul_mat_q_tc_kernel<tc::TQ80>;
+            cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+            kern<<<grid, block, smem, stream>>>(W_d, A_d, C_d, (int)N, (int)K, (int)ntok);
             break;
+        }
         default:
-            GGML_ABORT("unsupported type %d for TC kernel\n", (int)src0->type);
+            GGML_ABORT("unsupported type for TC kernel");
     }
 }
