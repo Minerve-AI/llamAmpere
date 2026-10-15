@@ -215,6 +215,8 @@ class Keys:
         KEY_LENGTH_MLA_SWA           = "{arch}.attention.key_length_mla_swa"
         VALUE_LENGTH_MLA_SWA         = "{arch}.attention.value_length_mla_swa"
         KV_LORA_RANK_SWA             = "{arch}.attention.kv_lora_rank_swa"
+        KV_LORA_RANK_MLA             = "{arch}.attention.kv_lora_rank_mla"
+        QK_ROPE_HEAD_DIM_MLA         = "{arch}.attention.qk_rope_head_dim_mla"
         SHARED_KV_LAYERS             = "{arch}.attention.shared_kv_layers"
         SLIDING_WINDOW_PATTERN       = "{arch}.attention.sliding_window_pattern"
         RECURRENT_LAYERS             = "{arch}.attention.recurrent_layers"
@@ -266,6 +268,8 @@ class Keys:
         SCALING_YARN_ATTN_FACTOR  = "{arch}.rope.scaling.yarn_attn_factor"
         SCALING_YARN_BETA_FAST    = "{arch}.rope.scaling.yarn_beta_fast"
         SCALING_YARN_BETA_SLOW    = "{arch}.rope.scaling.yarn_beta_slow"
+        KEEP_MLA                  = "{arch}.rope.keep_mla"
+        KEEP_COUNT_MLA            = "{arch}.rope.keep_count_mla"
 
     class Activation:
         SITU_BETA        = "{arch}.activation.situ_beta"
@@ -523,6 +527,7 @@ class MODEL_ARCH(IntEnum):
     QWEN3VLMOE       = auto()
     QWEN35           = auto()
     QWEN35MOE        = auto()
+    QWEN35_MLA       = auto()
     QWEN4EXP         = auto()
     PHI2             = auto()
     PHI3             = auto()
@@ -1289,6 +1294,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.QWEN3VLMOE:       "qwen3vlmoe",
     MODEL_ARCH.QWEN35:           "qwen35",
     MODEL_ARCH.QWEN35MOE:        "qwen35moe",
+    MODEL_ARCH.QWEN35_MLA:       "qwen35mla",
     MODEL_ARCH.QWEN4EXP:         "qwen4exp",
     MODEL_ARCH.PHI2:             "phi2",
     MODEL_ARCH.PHI3:             "phi3",

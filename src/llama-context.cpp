@@ -3118,6 +3118,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_BAILINGMOE3 ||
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
+        model.arch == LLM_ARCH_QWEN35_MLA ||
         model.arch == LLM_ARCH_QWEN4EXP ||
         model.arch == LLM_ARCH_DEEPSEEK4 ||
         model.arch == LLM_ARCH_DFLASH ||
@@ -4767,7 +4768,7 @@ void llama_set_nextn_layer_offset(llama_context * ctx, int32_t offset) {
 }
 
 bool llama_model_supports_mtp_chain(const llama_model * model) {
-    return model != nullptr && model->arch == LLM_ARCH_QWEN35;
+    return model != nullptr && (model->arch == LLM_ARCH_QWEN35 || model->arch == LLM_ARCH_QWEN35_MLA);
 }
 
 bool llama_model_uses_shared_position_draft(const llama_model * model) {

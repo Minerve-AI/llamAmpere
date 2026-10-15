@@ -295,6 +295,7 @@ struct llama_layer {
     struct ggml_tensor * wkv       = nullptr;
     struct ggml_tensor * wk_b      = nullptr;
     struct ggml_tensor * wv_b      = nullptr;
+    struct ggml_tensor * wk_b_raw  = nullptr;  // Qwen3.8-MLA: unscaled K up-projection for RMS
     struct ggml_tensor * wqkv_b    = nullptr;
     struct ggml_tensor * wo_a      = nullptr;
     struct ggml_tensor * wo_b      = nullptr;

@@ -45,6 +45,7 @@ enum llm_arch {
     LLM_ARCH_QWEN3VLMOE,
     LLM_ARCH_QWEN35,
     LLM_ARCH_QWEN35MOE,
+    LLM_ARCH_QWEN35_MLA,
     LLM_ARCH_QWEN4EXP,
     LLM_ARCH_PHI2,
     LLM_ARCH_PHI3,
@@ -292,6 +293,10 @@ enum llm_kv {
     LLM_KV_ATTENTION_KEY_LENGTH_MLA_SWA,
     LLM_KV_ATTENTION_VALUE_LENGTH_MLA_SWA,
     LLM_KV_ATTENTION_KV_LORA_RANK_SWA,
+    LLM_KV_ATTENTION_KV_LORA_RANK_MLA,       // Qwen3.8-MLA: per-layer latent rank array
+    LLM_KV_ATTENTION_QK_ROPE_HEAD_DIM_MLA,   // Qwen3.8-MLA: effective rope dim (58 for partial rope)
+    LLM_KV_ROPE_KEEP_MLA,                     // Qwen3.8-MLA: kept rope subspace indices
+    LLM_KV_ROPE_KEEP_COUNT_MLA,               // Qwen3.8-MLA: number of kept rope subspaces
     LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,
     LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
     LLM_KV_ATTENTION_INDEXER_TOP_K,
@@ -605,6 +610,7 @@ enum llm_tensor {
     LLM_TENSOR_ATTN_OUT_B,
     LLM_TENSOR_ATTN_K_B,
     LLM_TENSOR_ATTN_V_B,
+    LLM_TENSOR_ATTN_K_B_RAW,  // Qwen3.8-MLA: unscaled K up-projection for RMS computation
     LLM_TENSOR_ATTN_Q_A_NORM,
     LLM_TENSOR_ATTN_KV_A_NORM,
     LLM_TENSOR_HC_HEAD_FN,

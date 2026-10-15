@@ -666,6 +666,53 @@ class Qwen3_5MoeTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 
+@ModelBase.register("Qwen3_5MLAForConditionalGeneration")
+@ModelBase.example("TelperionAI/Qwen3.8-27B-MLA")
+class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+    model_arch = gguf.MODEL_ARCH.QWEN35_MLA
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        text_cfg = self._get_text_config()
+
+        # MLA-specific parameters
+        mla_ranks = text_cfg.get("mla_ranks", {})
+        if mla_ranks:
+            # Convert dict {layer_idx: rank} to array
+            n_layers = text_cfg.get("num_hidden_layers", 64)
+            rank_arr = [0] * n_layers
+            for k, v in mla_ranks.items():
+                il = int(k)
+                if il < n_layers:
+                    rank_arr[il] = int(v)
+            self.gguf_writer.add_kv_lora_rank_mla(rank_arr)
+
+        mla_rope_dim = text_cfg.get("mla_qk_rope_head_dim", 0)
+        if mla_rope_dim:
+            self.gguf_writer.add_qk_rope_head_dim_mla(int(mla_rope_dim))
+
+        mla_rope_keep = text_cfg.get("mla_rope_keep", [])
+        if mla_rope_keep:
+            self.gguf_writer.add_rope_keep_mla([int(x) for x in mla_rope_keep])
+            self.gguf_writer.add_rope_keep_count_mla(len(mla_rope_keep))
+
+    def _map_tensor_name(self, name: str, to_suffix: str) -> tuple[str, str] | None:
+        """Override tensor name mapping for MLA-specific tensors."""
+        # MLA: kv_a_proj → attn_kv_a_mqa
+        if name.endswith(".kv_a_proj.weight"):
+            return name.replace(".kv_a_proj.weight", ".attn_kv_a_mqa.weight"), to_suffix
+        # MLA: kv_b_proj → attn_kv_b (up-projection, used for both K and V absorption)
+        if name.endswith(".kv_b_proj.weight"):
+            return name.replace(".kv_b_proj.weight", ".attn_kv_b.weight"), to_suffix
+        # MLA: k_rope_proj → part of attn_kv_a_mqa (fused, handled by kv_a_proj)
+        if name.endswith(".k_rope_proj.weight"):
+            # k_rope_proj is fused into kv_a_proj in the checkpoint, so skip
+            return None
+        # Default: use parent mapping
+        return super()._map_tensor_name(name, to_suffix)
+
+
 @ModelBase.register("DFlashDraftModel", "DFlash2DraftModel")
 @ModelBase.example("z-lab/Qwen3.5-9B-DFlash")
 class DFlashModel(Qwen3Model):

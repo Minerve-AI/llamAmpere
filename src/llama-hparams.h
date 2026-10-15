@@ -121,6 +121,12 @@ struct llama_hparams {
     uint32_t n_embd_head_k_mla_swa   = 0;
     uint32_t n_embd_head_v_mla_swa   = 0;
 
+    // Qwen3.8-MLA: per-layer variable latent rank + partial rope
+    std::array<uint32_t, LLAMA_MAX_LAYERS> mla_kv_lora_rank_arr;  // per-layer latent rank (0 for non-MLA layers)
+    uint32_t mla_qk_rope_head_dim      = 0;  // effective rope dim (58 for partial rope, 0 = use n_rot)
+    uint32_t mla_rope_keep_count       = 0;  // number of kept rope subspaces
+    std::array<uint32_t, 32> mla_rope_keep;  // kept rope subspace indices
+
     float    expert_group_scale   = 0.05f;
     float    expert_weights_scale = 0.0f;
     bool     expert_weights_norm  = false;
