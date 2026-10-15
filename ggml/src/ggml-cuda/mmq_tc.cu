@@ -327,7 +327,7 @@ void ggml_cuda_mul_mat_tc(ggml_backend_cuda_context & ctx,
     GGML_ASSERT(K % tc::BK == 0);
 
     const uint8_t * W_d = (const uint8_t *) src0->data;
-    const __half  * A_d = (const __half *) src1->data;
+    const float   * A_d = (const float *) src1->data;
     float         * C_d = (float *) dst->data;
 
     const dim3 grid(N / tc::BM, ntok / tc::BN);
