@@ -674,7 +674,7 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
 
-        text_cfg = self._get_text_config()
+        text_cfg = self.hparams
 
         # MLA-specific parameters
         mla_ranks = text_cfg.get("mla_ranks", {})
@@ -737,8 +737,8 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         if hasattr(self, '_n_layer_cache'):
             return self._n_layer_cache
         n_layer = 64  # default for Qwen3.8-27B-MLA
-        if hasattr(self, 'text_cfg') and self.text_cfg:
-            n_layer = self.text_cfg.get('num_hidden_layers', 64)
+        if hasattr(self, 'hparams') and self.hparams:
+            n_layer = self.hparams.get('num_hidden_layers', 64)
         self._n_layer_cache = n_layer
         return n_layer
 
