@@ -700,24 +700,47 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
         """Override tensor name mapping for MLA-specific tensors."""
         import re as _re
-        # MLA-specific tensors: extract layer index and build proper blk.{i}.* name
-        mla_map = {
-            ".self_attn.q_proj.weight":    ".attn_qkv.weight",
-            ".self_attn.k_proj.weight":    ".attn_k.weight",
-            ".self_attn.v_proj.weight":    ".attn_v.weight",
-            ".kv_a_proj.weight":            ".attn_kv_a_mqa.weight",
-            ".k_rope_proj.weight":          ".attn_k_rope_proj.weight",
-            ".k_up_proj.weight":            ".attn_k_b.weight",
-            ".v_up_proj.weight":            ".attn_v_b.weight",
-        }
-        for suffix, gguf_suffix in mla_map.items():
-            if name.endswith(suffix):
-                m = _re.match(r"model\.layers\.(\d+)\.", name)
-                if m:
-                    bid = m.group(1)
+        m = _re.match(r"model\.layers\.(\d+)\.", name)
+        if not m:
+            return super().map_tensor_name(name, try_suffixes)
+        bid = m.group(1)
+        layer_idx = int(bid)
+        n_layer = self._get_n_layer()
+        is_mtp = layer_idx >= n_layer
+        if is_mtp:
+            # MTP layer: standard GQA (separate Q, K, V projections)
+            mtp_map = {
+                ".self_attn.q_proj.weight":    ".attn_q.weight",
+                ".self_attn.k_proj.weight":    ".attn_k.weight",
+                ".self_attn.v_proj.weight":    ".attn_v.weight",
+            }
+            for suffix, gguf_suffix in mtp_map.items():
+                if name.endswith(suffix):
+                    return f"blk.{bid}{gguf_suffix}"
+        else:
+            # Main model: MLA (fused Q+gate, latent projection, etc.)
+            mla_map = {
+                ".self_attn.q_proj.weight":    ".attn_qkv.weight",
+                ".kv_a_proj.weight":            ".attn_kv_a_mqa.weight",
+                ".k_rope_proj.weight":          ".attn_k_rope_proj.weight",
+                ".k_up_proj.weight":            ".attn_k_b.weight",
+                ".v_up_proj.weight":            ".attn_v_b.weight",
+            }
+            for suffix, gguf_suffix in mla_map.items():
+                if name.endswith(suffix):
                     return f"blk.{bid}{gguf_suffix}"
         # Default: use parent mapping
         return super().map_tensor_name(name, try_suffixes)
+
+    def _get_n_layer(self) -> int:
+        """Get the number of main model layers (excluding MTP)."""
+        if hasattr(self, '_n_layer_cache'):
+            return self._n_layer_cache
+        n_layer = 64  # default for Qwen3.8-27B-MLA
+        if hasattr(self, 'text_cfg') and self.text_cfg:
+            n_layer = self.text_cfg.get('num_hidden_layers', 64)
+        self._n_layer_cache = n_layer
+        return n_layer
 
 
 @ModelBase.register("DFlashDraftModel", "DFlash2DraftModel")

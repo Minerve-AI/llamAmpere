@@ -98,7 +98,21 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
         layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", il), { n_embd }, flags);
         layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", il), { n_embd }, flags);
 
-        if (!hparams.is_recr(il)) {
+        if (il >= n_layer) {
+            // MTP layer: standard GQA (separate Q, K, V projections)
+            const int64_t n_head   = hparams.n_head();
+            const int64_t n_head_kv = hparams.n_head_kv();
+            const int64_t head_dim = hparams.n_embd_head_v();
+
+            layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", il), { n_embd, n_head * head_dim }, flags);
+            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", il), { n_embd, n_head_kv * head_dim }, flags);
+            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", il), { n_embd, n_head_kv * head_dim }, flags);
+            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_head * head_dim, n_embd }, flags);
+
+            // Q/K normalization
+            layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { head_dim }, flags);
+            layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", il), { head_dim }, flags);
+        } else if (!hparams.is_recr(il)) {
             // Full-attention MLA layer
             const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
             const int64_t rope_dim = hparams.n_rot(); // 64 (full rope dim for cache)
@@ -653,7 +667,7 @@ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35mla::graph::build_qkvz
 
 //
 // MTP graph for Qwen3.8-MLA
-// The MTP layer uses MLA attention (same as the main model's full-attention layers).
+// The MTP layer uses standard GQA attention (separate Q, K, V projections).
 //
 
 llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params)
@@ -662,13 +676,14 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
     GGML_ASSERT(hparams.n_layer_nextn == 1 && "QWEN35_MLA MTP currently only supports a single MTP block");
 
     const int64_t head_dim = hparams.n_embd_head_v();
+    const int64_t n_head   = hparams.n_head();
+    const int64_t n_head_kv = hparams.n_head_kv();
 
     const int il = hparams.n_layer();
     const auto & layer = model.layers[il];
 
-    GGML_ASSERT(layer.nextn.eh_proj && "MTP block missing nextn.eh_proj");
-    GGML_ASSERT(layer.nextn.enorm   && "MTP block missing nextn.enorm");
-    GGML_ASSERT(layer.nextn.hnorm   && "MTP block missing nextn.hnorm");
+    // MTP-specific tensors are optional - if absent, use hidden state directly
+    const bool has_mtp_proj = layer.nextn.eh_proj != nullptr;
 
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
@@ -715,90 +730,62 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
 
         ggml_tensor * k_idxs = inp_attn->get_k_idxs();
 
+        // If MTP projection is available, use it; otherwise just use the hidden state
         auto build_proj = [&](ggml_tensor * tok_in, ggml_tensor * h_in) -> ggml_tensor * {
-            ggml_tensor * h_norm_b = build_norm(h_in, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
-            ggml_tensor * e_norm_b = build_norm(tok_in, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
-            return build_lora_mm(layer.nextn.eh_proj, ggml_concat(ctx0, e_norm_b, h_norm_b, 0), layer.nextn.eh_proj_s);
+            if (has_mtp_proj) {
+                ggml_tensor * h_norm_b = build_norm(h_in, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+                ggml_tensor * e_norm_b = build_norm(tok_in, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+                return build_lora_mm(layer.nextn.eh_proj, ggml_concat(ctx0, e_norm_b, h_norm_b, 0), layer.nextn.eh_proj_s);
+            }
+            // No MTP projection: just return the hidden state
+            return h_in;
         };
 
-        // MLA absorbed attention block for MTP chained drafting
+        // Standard GQA attention block for MTP chained drafting
         auto build_block = [&](ggml_tensor * cur_in, int64_t row0, int64_t width) -> ggml_tensor * {
             ggml_tensor * cur_b = cur_in;
             ggml_tensor * inpSA_b = cur_b;
 
             cur_b = build_norm(cur_b, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
 
-            const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
-            const int64_t n_head   = hparams.n_head();
-            const int64_t n_rot    = hparams.n_rot();
-            const int64_t qk_nope  = head_dim - n_rot;
-            const int64_t n_kv_base = 4;
-
-            // Q projection (fused Q + gate)
-            ggml_tensor * Qcur_full = ggml_mul_mat(ctx0, layer.wqkv, cur_b);
-            ggml_tensor * Q_b = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, width,
-                ggml_element_size(Qcur_full) * head_dim * 2,
-                ggml_element_size(Qcur_full) * head_dim * 2 * n_head, 0);
+            // Q projection
+            ggml_tensor * Q_b = ggml_mul_mat(ctx0, layer.wq, cur_b);
+            Q_b = ggml_reshape_3d(ctx0, Q_b, head_dim, n_head, width);
             Q_b = build_norm(Q_b, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
 
-            ggml_tensor * gate_b = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, width,
-                ggml_element_size(Qcur_full) * head_dim * 2,
-                ggml_element_size(Qcur_full) * head_dim * 2 * n_head,
-                ggml_element_size(Qcur_full) * head_dim);
-            gate_b = ggml_cont_2d(ctx0, gate_b, head_dim * n_head, width);
+            // K projection
+            ggml_tensor * K_b = ggml_mul_mat(ctx0, layer.wk, cur_b);
+            K_b = ggml_reshape_3d(ctx0, K_b, head_dim, n_head_kv, width);
+            K_b = build_norm(K_b, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
 
-            // Split Q into nope + pe
-            ggml_tensor * q_pe_b = ggml_view_3d(ctx0, Q_b, n_rot, n_head, width,
-                ggml_row_size(Q_b->type, head_dim),
-                ggml_row_size(Q_b->type, head_dim) * n_head, 0);
-            ggml_tensor * q_nope_b = ggml_view_3d(ctx0, Q_b, qk_nope, n_head, width,
-                ggml_row_size(Q_b->type, head_dim),
-                ggml_row_size(Q_b->type, head_dim) * n_head,
-                ggml_row_size(Q_b->type, n_rot));
+            // V projection
+            ggml_tensor * V_b = ggml_mul_mat(ctx0, layer.wv, cur_b);
+            V_b = ggml_reshape_3d(ctx0, V_b, head_dim, n_head_kv, width);
 
-            // Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
-            ggml_tensor * wk_b_t_b = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
-            ggml_tensor * q_nope_p_b = ggml_permute(ctx0, q_nope_b, 0, 2, 1, 3);
-            ggml_tensor * Q_abs_b_3d = ggml_mul_mat(ctx0, wk_b_t_b, q_nope_p_b);
-            ggml_tensor * Q_abs_b = ggml_permute(ctx0, Q_abs_b_3d, 1, 0, 2, 3);
-
-            // Latent + k_rope
-            ggml_tensor * latent_b = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur_b);
-            ggml_tensor * k_rope_2d_b = ggml_mul_mat(ctx0, layer.wk_rope, cur_b);
-            ggml_tensor * k_rope_b = ggml_reshape_3d(ctx0, k_rope_2d_b, n_rot, n_kv_base, width);
-
-            // RoPE positions (section-major for M-RoPE)
+            // RoPE positions
             ggml_tensor * pos_b = ggml_cont(ctx0, ggml_view_2d(ctx0, inp_pos, width, 4,
                     (size_t) n_tokens*inp_pos->nb[0], (size_t) row0*inp_pos->nb[0]));
             pos_b = ggml_reshape_1d(ctx0, pos_b, 4*width);
 
-            q_pe_b = ggml_rope_multi(ctx0, q_pe_b, pos_b, nullptr,
-                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+            Q_b = ggml_rope_multi(ctx0, Q_b, pos_b, nullptr,
+                    hparams.n_rot(), sections, rope_type, n_ctx_orig, freq_base, freq_scale,
                     ext_factor, attn_factor, beta_fast, beta_slow);
-            k_rope_b = ggml_rope_multi(ctx0, k_rope_b, pos_b, nullptr,
-                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+            K_b = ggml_rope_multi(ctx0, K_b, pos_b, nullptr,
+                    hparams.n_rot(), sections, rope_type, n_ctx_orig, freq_base, freq_scale,
                     ext_factor, attn_factor, beta_fast, beta_slow);
 
-            // Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, width]
-            ggml_tensor * latent_3d_b = ggml_reshape_3d(ctx0, latent_b, rank, 1, width);
-            ggml_tensor * k_rope_packed_b = ggml_reshape_2d(ctx0, k_rope_b, n_rot * n_kv_base, width);
-            ggml_tensor * K_packed_2d_b = ggml_concat(ctx0, latent_3d_b, k_rope_packed_b, 0);
-            ggml_tensor * K_packed_b = ggml_reshape_3d(ctx0, K_packed_2d_b, rank + n_rot * n_kv_base, 1, width);
-
-            // Store K in cache (no V cache for MLA)
+            // Store K and V in cache
             ggml_tensor * k_idx_b = ggml_view_1d(ctx0, k_idxs, width, row0*k_idxs->nb[0]);
-            ggml_build_forward_expand(gf, mctx_kv->cpy_k(ctx0, K_packed_b, k_idx_b, il));
+            ggml_build_forward_expand(gf, mctx_kv->cpy_k(ctx0, K_b, k_idx_b, il));
+            ggml_build_forward_expand(gf, mctx_kv->cpy_v(ctx0, V_b, k_idx_b, il));
 
-            // Assemble Q = [Q_absorbed | q_pe_rope]
-            ggml_tensor * Q_full_b = ggml_concat(ctx0, Q_abs_b, q_pe_b, 0);
-
-            // Attention with MLA (V computed from latent via wv_b)
+            // Attention
             ggml_tensor * k_view = mctx_kv->get_k(ctx0, il);
+            ggml_tensor * v_view = mctx_kv->get_v(ctx0, il);
 
             cur_b = build_attn(inp_attn,
                     nullptr, nullptr, nullptr,
-                    Q_full_b, k_view, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
-            cur_b = ggml_mul(ctx0, cur_b, ggml_sigmoid(ctx0, gate_b));
+                    Q_b, k_view, v_view, nullptr, nullptr, nullptr, kq_scale, il);
             cur_b = build_lora_mm(layer.wo, cur_b, layer.wo_s);
             cur_b = ggml_add(ctx0, cur_b, inpSA_b);
 
@@ -899,96 +886,58 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
     }
 
     // --- Single-step MTP path ---
-    ggml_tensor * h_norm = build_norm(h_embd, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
-    cb(h_norm, "mtp_hnorm", il);
+    // If MTP projection is available, use it; otherwise just use the hidden state
+    ggml_tensor * cur;
+    if (has_mtp_proj) {
+        ggml_tensor * h_norm = build_norm(h_embd, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+        cb(h_norm, "mtp_hnorm", il);
 
-    ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
-    cb(e_norm, "mtp_enorm", il);
+        ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+        cb(e_norm, "mtp_enorm", il);
 
-    ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
-    cb(concat, "mtp_concat", il);
+        ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
+        cb(concat, "mtp_concat", il);
 
-    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat, layer.nextn.eh_proj_s);
-    cb(cur, "mtp_eh_proj", il);
+        cur = build_lora_mm(layer.nextn.eh_proj, concat, layer.nextn.eh_proj_s);
+        cb(cur, "mtp_eh_proj", il);
+    } else {
+        // No MTP projection: just use the hidden state
+        cur = h_embd;
+        cb(cur, "mtp_h_direct", il);
+    }
 
     ggml_tensor * inpSA = cur;
 
     cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
     cb(cur, "mtp_attn_norm", il);
 
-    // MLA attention for MTP
-    const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
-    const int64_t n_head   = hparams.n_head();
-    const int64_t n_rot    = hparams.n_rot();
-    const int64_t qk_nope  = head_dim - n_rot;
-    const int64_t n_kv_base = 4;
-
-    ggml_tensor * Qcur_full = ggml_mul_mat(ctx0, layer.wqkv, cur);
-    cb(Qcur_full, "mtp_Qcur_full", il);
-
-    ggml_tensor * Qcur = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, n_tokens,
-        ggml_element_size(Qcur_full) * head_dim * 2,
-        ggml_element_size(Qcur_full) * head_dim * 2 * n_head, 0);
+    // Standard GQA attention for MTP
+    ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.wq, cur);
+    Qcur = ggml_reshape_3d(ctx0, Qcur, head_dim, n_head, n_tokens);
     Qcur = build_norm(Qcur, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
-    cb(Qcur, "mtp_Qcur_normed", il);
+    cb(Qcur, "mtp_Qcur", il);
 
-    ggml_tensor * gate = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, n_tokens,
-        ggml_element_size(Qcur_full) * head_dim * 2,
-        ggml_element_size(Qcur_full) * head_dim * 2 * n_head,
-        ggml_element_size(Qcur_full) * head_dim);
-    gate = ggml_cont_2d(ctx0, gate, head_dim * n_head, n_tokens);
-    cb(gate, "mtp_gate", il);
+    ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.wk, cur);
+    Kcur = ggml_reshape_3d(ctx0, Kcur, head_dim, n_head_kv, n_tokens);
+    Kcur = build_norm(Kcur, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
+    cb(Kcur, "mtp_Kcur", il);
 
-    // Split Q
-    ggml_tensor * q_pe = ggml_view_3d(ctx0, Qcur, n_rot, n_head, n_tokens,
-        ggml_row_size(Qcur->type, head_dim),
-        ggml_row_size(Qcur->type, head_dim) * n_head, 0);
-    ggml_tensor * q_nope = ggml_view_3d(ctx0, Qcur, qk_nope, n_head, n_tokens,
-        ggml_row_size(Qcur->type, head_dim),
-        ggml_row_size(Qcur->type, head_dim) * n_head,
-        ggml_row_size(Qcur->type, n_rot));
-
-    // Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
-    ggml_tensor * wk_b_t = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
-    ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
-    ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
-    ggml_tensor * Q_abs = ggml_permute(ctx0, Q_abs_3d, 1, 0, 2, 3);
-    cb(Q_abs, "mtp_Q_absorbed", il);
-
-    // Latent + k_rope
-    ggml_tensor * latent = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
-    cb(latent, "mtp_latent", il);
-
-    ggml_tensor * k_rope_2d = ggml_mul_mat(ctx0, layer.wk_rope, cur);
-    ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
+    ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.wv, cur);
+    Vcur = ggml_reshape_3d(ctx0, Vcur, head_dim, n_head_kv, n_tokens);
+    cb(Vcur, "mtp_Vcur", il);
 
     // RoPE
-    q_pe = ggml_rope_multi(ctx0, q_pe, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+    Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
+            hparams.n_rot(), sections, rope_type, n_ctx_orig, freq_base, freq_scale,
             ext_factor, attn_factor, beta_fast, beta_slow);
-    k_rope = ggml_rope_multi(ctx0, k_rope, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+    Kcur = ggml_rope_multi(ctx0, Kcur, inp_pos, nullptr,
+            hparams.n_rot(), sections, rope_type, n_ctx_orig, freq_base, freq_scale,
             ext_factor, attn_factor, beta_fast, beta_slow);
 
-    // Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, n_tokens]
-    ggml_tensor * latent_3d = ggml_reshape_3d(ctx0, latent, rank, 1, n_tokens);
-    ggml_tensor * k_rope_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
-    ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_3d, k_rope_packed, 0);
-    ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
-    cb(K_packed, "mtp_K_packed", il);
-
-    // Assemble Q = [Q_absorbed | q_pe_rope]
-    ggml_tensor * Q_full = ggml_concat(ctx0, Q_abs, q_pe, 0);
-    cb(Q_full, "mtp_Q_full", il);
-
-    // Attention with MLA (V computed from latent via wv_b)
+    // Attention
     cur = build_attn(inp_attn,
             layer.wo, nullptr, layer.wo_s,
-            Q_full, K_packed, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
-    cb(cur, "mtp_attn_pregate", il);
-
-    cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate));
-    cur = build_lora_mm(layer.wo, cur, layer.wo_s);
+            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
     cb(cur, "mtp_attn_out", il);
 
     cur = ggml_add(ctx0, cur, inpSA);
