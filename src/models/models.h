@@ -2557,7 +2557,7 @@ struct llama_model_qwen35mla : public llama_model_base {
         graph(const llama_model & model, const llm_graph_params & params);
     private:
         ggml_tensor * build_layer_attn_mla(
-            llm_graph_input_attn_kv * inp_attn,
+            llm_graph_input_attn_k * inp_attn,
                     ggml_tensor * cur,
                     ggml_tensor * inp_pos,
                             int * sections,

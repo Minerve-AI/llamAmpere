@@ -37,12 +37,27 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
         }
     }
 
-    // For the decompressed MHA implementation, we use n_head heads for K and V.
-    // Override n_head_kv to n_head so the KV cache is sized correctly.
-    // TODO: implement absorbed attention (MQA with latent cache) for memory efficiency.
-    for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
-        if (!hparams.is_recr(i)) {
-            hparams.n_head_kv_arr[i] = hparams.n_head();
+    // Absorbed attention: KV cache stores latent + k_rope (MQA, single "head").
+    // K cache dim = rank + rope_dim * n_head_kv_base (packed latent + rope key)
+    // V is computed from the latent at attention time via wv_b (not stored).
+    {
+        const uint32_t n_kv_base = 4; // base model KV heads for rope
+        const uint32_t rope_dim  = hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : 64;
+        // Use the max rank across all MLA layers for uniform cache sizing
+        uint32_t max_rank = 0;
+        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
+            if (!hparams.is_recr(i) && hparams.mla_kv_lora_rank_arr[i] > max_rank) {
+                max_rank = hparams.mla_kv_lora_rank_arr[i];
+            }
+        }
+        hparams.n_embd_head_k_mla_impl = max_rank + rope_dim * n_kv_base;
+        hparams.n_embd_head_v_mla_impl = max_rank; // V dim (latent), not actually stored
+
+        // KV cache uses single "head" (MQA): the latent is shared across all Q heads
+        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
+            if (!hparams.is_recr(i)) {
+                hparams.n_head_kv_arr[i] = 1;
+            }
         }
     }
 
@@ -194,7 +209,7 @@ llama_model_qwen35mla::graph::graph(const llama_model & model, const llm_graph_p
     inpL = build_inp_embd(model.tok_embd);
     cb(inpL, "model.input_embed", -1);
 
-    auto * inp = build_inp_mem_hybrid();
+    auto * inp = build_inp_mem_hybrid_k();
 
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
@@ -257,19 +272,25 @@ llama_model_qwen35mla::graph::graph(const llama_model & model, const llm_graph_p
 }
 
 //
-// MLA attention layer (decompressed MHA)
+// MLA attention layer (absorbed attention with latent KV cache)
 //
-// Computes K and V explicitly from the latent:
-//   K_nope[i,h,t] = sum_j wk_b[j,i,h] * latent[j,t]   (per Q-head)
-//   V[i,h,t]      = sum_j wv_b[j,i,h] * latent[j,t]   (per Q-head)
-//   K = [K_nope | k_rope_expanded]  (256, 24, n_tokens)
-//   V = wv_b @ latent                (256, 24, n_tokens)
+// Architecture (inspired by DeepSeek MLA, adapted for per-head wk_b/wv_b):
 //
-// The rope is computed per-KV-head (4 heads) and expanded to 24 Q heads via GQA repeat.
+//   KV cache stores: [latent | k_rope] packed → [rank + rope_dim*n_kv_base, 1, n_cache]
+//   V is NOT stored — computed from latent at attention time via wv_b
+//
+//   Q absorption: Q_nope is projected through wk_b^T (per-head) so that the
+//   attention dot product Q·K operates on the latent directly.
+//
+//   scores = [Q_absorbed · K_latent^T  +  q_pe · k_rope^T] * scale
+//   attn_out = scores · V  where V = wv_b^T @ latent (per-head)
+//
+//   Memory: (rank + rope_dim*4) per token per layer  vs  2*head_dim*n_head for MHA
+//   Example: (512+256)=768  vs  2*256*24=12288  →  16x reduction
 //
 
 ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
-        llm_graph_input_attn_kv * inp,
+        llm_graph_input_attn_k * inp,
         ggml_tensor *             cur,
         ggml_tensor *             inp_pos,
         int *                     sections,
@@ -281,12 +302,12 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     const int64_t n_head    = hparams.n_head();           // 24
     const int64_t n_rot     = hparams.n_rot();            // 64
     const int64_t qk_nope   = head_dim - n_rot;           // 192
-    const int64_t n_head_kv_base = 4;                     // base model KV heads
+    const int64_t n_kv_base = 4;                          // base model KV heads for rope
 
     GGML_ASSERT(rank > 0);
 
     //
-    // 1. Q projection (fused Q + gate, same as base model)
+    // 1. Q projection (fused Q + gate)
     //
     ggml_tensor * Qcur_full = ggml_mul_mat(ctx0, layer.wqkv, cur);
     cb(Qcur_full, "Qcur_full", il);
@@ -302,12 +323,12 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         ggml_element_size(Qcur_full) * head_dim);
     cb(gate, "gate", il);
 
-    // Q normalization
+    // Q normalization (per-head RMS over full head_dim)
     Qcur = build_norm(Qcur, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
     cb(Qcur, "Qcur_normed", il);
 
     //
-    // 2. Split Q into q_nope and q_pe, apply RoPE
+    // 2. Split Q into q_nope and q_pe
     //
     ggml_tensor * q_pe = ggml_view_3d(ctx0, Qcur, n_rot, n_head, n_tokens,
         ggml_row_size(Qcur->type, head_dim),
@@ -320,89 +341,79 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         ggml_row_size(Qcur->type, n_rot));
     cb(q_nope, "q_nope", il);
 
-    // Apply RoPE to q_pe (full 64 dims)
-    q_pe = ggml_rope_multi(
-            ctx0, q_pe, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-            ext_factor, attn_factor, beta_fast, beta_slow);
-    cb(q_pe, "q_pe_rope", il);
-
     //
-    // 3. Latent + RoPE projection (separate tensors)
-    //
-    ggml_tensor * latent = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
-    cb(latent, "latent", il);
-
-    ggml_tensor * k_rope_2d = ggml_mul_mat(ctx0, layer.wk_rope, cur);
-    cb(k_rope_2d, "k_rope_2d", il);
-
-    ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_head_kv_base, n_tokens);
-    cb(k_rope, "k_rope_raw", il);
-
-    // Apply RoPE to k_rope (full 64 dims)
-    k_rope = ggml_rope_multi(
-            ctx0, k_rope, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-            ext_factor, attn_factor, beta_fast, beta_slow);
-    cb(k_rope, "k_rope_rope", il);
-
-    //
-    // 4. Compute K_nope = wk_b^T @ latent  (per Q-head)
+    // 3. Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
     //    wk_b: [rank, qk_nope, n_head]
-    //    Result: [qk_nope, n_head, n_tokens]
+    //    Result: [rank, n_head, n_tokens]
     //
     {
-        // Reshape wk_b to [rank, qk_nope*n_head], transpose to [qk_nope*n_head, rank]
-        ggml_tensor * wk_b_2d = ggml_reshape_2d(ctx0, layer.wk_b, rank, qk_nope * n_head);
-        ggml_tensor * K_nope_2d = ggml_mul_mat(ctx0, ggml_transpose(ctx0, wk_b_2d), latent);
-        // [qk_nope*n_head, n_tokens] → [qk_nope, n_head, n_tokens]
-        ggml_tensor * K_nope = ggml_reshape_3d(ctx0, K_nope_2d, qk_nope, n_head, n_tokens);
-        cb(K_nope, "K_nope", il);
+        // Permute wk_b: [rank, qk_nope, n_head] → [qk_nope, n_head, rank]
+        ggml_tensor * wk_b_t = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
+        // Permute q_nope: [qk_nope, n_head, n_tokens] → [qk_nope, n_tokens, n_head]
+        ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
+        // Batched matmul: [n_head, rank, n_tokens] → reshape to [rank, n_head, n_tokens]
+        ggml_tensor * Q_absorbed_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
+        ggml_tensor * Q_absorbed = ggml_permute(ctx0, Q_absorbed_3d, 1, 0, 2, 3);
+        cb(Q_absorbed, "Q_absorbed", il);
 
         //
-        // 5. Expand k_rope from 4 KV heads to 24 Q heads (GQA repeat)
-        //    k_rope: [64, 4, n_tokens] → [64, 24, n_tokens]
-        //    Head i uses KV head i/6
+        // 4. Latent + k_rope projection
         //
-        ggml_tensor * k_rope_4d = ggml_reshape_4d(ctx0, k_rope, n_rot, n_head_kv_base, 1, n_tokens);
-        ggml_tensor * k_rope_rep = ggml_repeat_4d(ctx0, k_rope_4d, n_rot, n_head_kv_base, n_head / n_head_kv_base, n_tokens);
-        ggml_tensor * k_rope_24 = ggml_reshape_3d(ctx0, k_rope_rep, n_rot, n_head, n_tokens);
-        cb(k_rope_24, "k_rope_24", il);
+        ggml_tensor * latent = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
+        cb(latent, "latent", il);
+
+        ggml_tensor * k_rope_2d = ggml_mul_mat(ctx0, layer.wk_rope, cur);
+        cb(k_rope_2d, "k_rope_2d", il);
+
+        ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
+        cb(k_rope, "k_rope_raw", il);
+
+        // Apply RoPE to q_pe and k_rope
+        q_pe = ggml_rope_multi(
+                ctx0, q_pe, inp_pos, nullptr,
+                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                ext_factor, attn_factor, beta_fast, beta_slow);
+        cb(q_pe, "q_pe_rope", il);
+
+        k_rope = ggml_rope_multi(
+                ctx0, k_rope, inp_pos, nullptr,
+                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                ext_factor, attn_factor, beta_fast, beta_slow);
+        cb(k_rope, "k_rope_rope", il);
 
         //
-        // 6. Assemble K = [K_nope | k_rope_24] → [head_dim, n_head, n_tokens]
+        // 5. Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, n_tokens]
+        //    The KV cache stores this packed tensor (MQA, single "head")
         //
-        ggml_tensor * K = ggml_concat(ctx0, K_nope, k_rope_24, 0);
-        cb(K, "K", il);
+        // Reshape latent to 3D: [rank, 1, n_tokens]
+        ggml_tensor * latent_3d = ggml_reshape_3d(ctx0, latent, rank, 1, n_tokens);
+        // Reshape k_rope to 2D: [n_rot*n_kv_base, n_tokens]
+        ggml_tensor * k_rope_2d_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
+        // Concatenate: [rank + n_rot*n_kv_base, n_tokens]
+        ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_3d, k_rope_2d_packed, 0);
+        // Reshape to [rank + n_rot*n_kv_base, 1, n_tokens] for KV cache
+        ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
+        cb(K_packed, "K_packed", il);
 
         //
-        // 7. Compute V = wv_b^T @ latent  (per Q-head)
-        //    wv_b: [rank, head_dim, n_head]
-        //    Result: [head_dim, n_head, n_tokens]
+        // 6. Assemble Q = [Q_absorbed | q_pe_rope] → [rank + n_rot, n_head, n_tokens]
         //
-        ggml_tensor * wv_b_2d = ggml_reshape_2d(ctx0, layer.wv_b, rank, head_dim * n_head);
-        ggml_tensor * V_2d = ggml_mul_mat(ctx0, ggml_transpose(ctx0, wv_b_2d), latent);
-        ggml_tensor * V = ggml_reshape_3d(ctx0, V_2d, head_dim, n_head, n_tokens);
-        cb(V, "V", il);
+        ggml_tensor * Q_full = ggml_concat(ctx0, Q_absorbed, q_pe, 0);
+        cb(Q_full, "Q_full", il);
 
         //
-        // 8. Reassemble Q = [q_nope | q_pe_rope] → [head_dim, n_head, n_tokens]
-        //
-        ggml_tensor * Q = ggml_concat(ctx0, q_nope, q_pe, 0);
-        cb(Q, "Q", il);
-
-        //
-        // 9. MHA attention
+        // 7. Attention with MLA (V computed from latent via wv_b)
+        //    The build_attn with v_mla computes V = wv_b @ latent internally
         //
         const float kq_scale = 1.0f / sqrtf(float(head_dim));
 
         ggml_tensor * attn_out = build_attn(inp,
                     layer.wo, nullptr, layer.wo_s,
-                    Q, K, V, nullptr, nullptr, nullptr, kq_scale, il);
+                    Q_full, K_packed, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
         cb(attn_out, "attn_out", il);
 
         //
-        // 10. Apply gate (sigmoid)
+        // 8. Apply gate (sigmoid)
         //
         ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
         cb(gate_sigmoid, "gate_sigmoid", il);
@@ -548,26 +559,20 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_linear(
 }
 
 //
-// FFN layer - same as qwen35
+// FFN layer - free function (shared between graph and graph_mtp)
 //
-
-ggml_tensor * llama_model_qwen35mla::graph::build_layer_ffn(
-        ggml_tensor * cur,
-        int           il) {
-    const auto & layer = model.layers[il];
-    GGML_ASSERT(model.layers[il].ffn_gate_inp == nullptr);
-
+static ggml_tensor * qwen35mla_build_ffn(llm_graph_context & g, const llama_layer & layer, ggml_tensor * cur, int il) {
     if (layer.ffn_gate == nullptr) {
         // EXL3 fused layout: ffn_up = [gate | up]
         GGML_ASSERT(layer.ffn_up_s == nullptr && layer.ffn_gate_s == nullptr);
-        cur = build_ffn(cur,
+        cur = g.build_ffn(cur,
             layer.ffn_up,   nullptr, nullptr,
             nullptr,        nullptr, nullptr,
             layer.ffn_down, nullptr, layer.ffn_down_s,
             nullptr,
             LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
     } else {
-        cur = build_ffn(cur,
+        cur = g.build_ffn(cur,
             layer.ffn_up,   nullptr, layer.ffn_up_s,
             layer.ffn_gate, nullptr, layer.ffn_gate_s,
             layer.ffn_down, nullptr, layer.ffn_down_s,
@@ -576,19 +581,26 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_ffn(
     }
 
     // Run the parallel FFN on the same input as the main FFN.
-    if (model.layers[il].ffn_up_par != nullptr) {
-        ggml_tensor * par = build_ffn(cur,
-            model.layers[il].ffn_up_par, NULL, NULL,
-            model.layers[il].ffn_gate_par, NULL, NULL,
-            model.layers[il].ffn_down_par, NULL, NULL,
+    if (layer.ffn_up_par != nullptr) {
+        ggml_tensor * par = g.build_ffn(cur,
+            layer.ffn_up_par, NULL, NULL,
+            layer.ffn_gate_par, NULL, NULL,
+            layer.ffn_down_par, NULL, NULL,
             NULL,
             LLM_FFN_SILU, LLM_FFN_PAR, il);
-        cb(par, "ffn_par_out", il);
-        cur = ggml_add(ctx0, cur, par);
+        g.cb(par, "ffn_par_out", il);
+
+        cur = ggml_add(g.ctx0, cur, par);
     }
 
-    cb(cur, "ffn_out", il);
+    g.cb(cur, "ffn_out", il);
     return cur;
+}
+
+ggml_tensor * llama_model_qwen35mla::graph::build_layer_ffn(
+        ggml_tensor * cur,
+        int           il) {
+    return qwen35mla_build_ffn(*this, model.layers[il], cur, il);
 }
 
 ggml_tensor * llama_model_qwen35mla::graph::build_norm_gated(
@@ -640,10 +652,377 @@ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35mla::graph::build_qkvz
 }
 
 //
-// MTP graph - placeholder
+// MTP graph for Qwen3.8-MLA
+// The MTP layer uses MLA attention (same as the main model's full-attention layers).
 //
 
-llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params) :
-    llm_graph_context(params) {
-    throw std::runtime_error("Qwen3.8-MLA MTP graph not yet implemented");
+llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params)
+    : llm_graph_context(params) {
+    GGML_ASSERT(hparams.n_layer_nextn > 0 && "QWEN35_MLA MTP requires n_layer_nextn > 0");
+    GGML_ASSERT(hparams.n_layer_nextn == 1 && "QWEN35_MLA MTP currently only supports a single MTP block");
+
+    const int64_t head_dim = hparams.n_embd_head_v();
+
+    const int il = hparams.n_layer();
+    const auto & layer = model.layers[il];
+
+    GGML_ASSERT(layer.nextn.eh_proj && "MTP block missing nextn.eh_proj");
+    GGML_ASSERT(layer.nextn.enorm   && "MTP block missing nextn.enorm");
+    GGML_ASSERT(layer.nextn.hnorm   && "MTP block missing nextn.hnorm");
+
+    int sections[4];
+    std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
+
+    auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd);
+
+    inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_set_input(inp->tokens);
+
+    inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_inp(), n_tokens);
+    ggml_set_input(inp->embd);
+
+    ggml_tensor * tok_embd;
+    if (ubatch.token) {
+        ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
+        tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+        tok_embd = build_hadamard_inverse(tok_embd_w, tok_embd);
+    } else {
+        tok_embd = inp->embd;
+    }
+    cb(tok_embd, "mtp_tok_embd", il);
+
+    inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
+    ggml_set_input(inp->h);
+    ggml_set_name(inp->h, "mtp_h_input");
+
+    ggml_tensor * h_embd = inp->h;
+
+    res->add_input(std::move(inp));
+
+    ggml_tensor * inp_pos     = build_inp_pos();
+    ggml_tensor * inp_out_ids = build_inp_out_ids();
+
+    auto * inp_attn = build_attn_inp_k();
+
+    const float kq_scale = hparams.f_attention_scale == 0.0f
+            ? 1.0f / sqrtf(float(head_dim)) : hparams.f_attention_scale;
+
+    // --- Chained drafting path ---
+    if (params.cparams.mtp_chain && ubatch.n_seqs_unq == 1 && ubatch.token) {
+        const auto * mctx_kv = static_cast<const llama_kv_cache_context *>(mctx);
+
+        ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
+
+        ggml_tensor * k_idxs = inp_attn->get_k_idxs();
+
+        auto build_proj = [&](ggml_tensor * tok_in, ggml_tensor * h_in) -> ggml_tensor * {
+            ggml_tensor * h_norm_b = build_norm(h_in, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+            ggml_tensor * e_norm_b = build_norm(tok_in, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+            return build_lora_mm(layer.nextn.eh_proj, ggml_concat(ctx0, e_norm_b, h_norm_b, 0), layer.nextn.eh_proj_s);
+        };
+
+        // MLA absorbed attention block for MTP chained drafting
+        auto build_block = [&](ggml_tensor * cur_in, int64_t row0, int64_t width) -> ggml_tensor * {
+            ggml_tensor * cur_b = cur_in;
+            ggml_tensor * inpSA_b = cur_b;
+
+            cur_b = build_norm(cur_b, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+
+            const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
+            const int64_t n_head   = hparams.n_head();
+            const int64_t n_rot    = hparams.n_rot();
+            const int64_t qk_nope  = head_dim - n_rot;
+            const int64_t n_kv_base = 4;
+
+            // Q projection (fused Q + gate)
+            ggml_tensor * Qcur_full = ggml_mul_mat(ctx0, layer.wqkv, cur_b);
+            ggml_tensor * Q_b = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, width,
+                ggml_element_size(Qcur_full) * head_dim * 2,
+                ggml_element_size(Qcur_full) * head_dim * 2 * n_head, 0);
+            Q_b = build_norm(Q_b, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
+
+            ggml_tensor * gate_b = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, width,
+                ggml_element_size(Qcur_full) * head_dim * 2,
+                ggml_element_size(Qcur_full) * head_dim * 2 * n_head,
+                ggml_element_size(Qcur_full) * head_dim);
+            gate_b = ggml_cont_2d(ctx0, gate_b, head_dim * n_head, width);
+
+            // Split Q into nope + pe
+            ggml_tensor * q_pe_b = ggml_view_3d(ctx0, Q_b, n_rot, n_head, width,
+                ggml_row_size(Q_b->type, head_dim),
+                ggml_row_size(Q_b->type, head_dim) * n_head, 0);
+            ggml_tensor * q_nope_b = ggml_view_3d(ctx0, Q_b, qk_nope, n_head, width,
+                ggml_row_size(Q_b->type, head_dim),
+                ggml_row_size(Q_b->type, head_dim) * n_head,
+                ggml_row_size(Q_b->type, n_rot));
+
+            // Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
+            ggml_tensor * wk_b_t_b = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
+            ggml_tensor * q_nope_p_b = ggml_permute(ctx0, q_nope_b, 0, 2, 1, 3);
+            ggml_tensor * Q_abs_b_3d = ggml_mul_mat(ctx0, wk_b_t_b, q_nope_p_b);
+            ggml_tensor * Q_abs_b = ggml_permute(ctx0, Q_abs_b_3d, 1, 0, 2, 3);
+
+            // Latent + k_rope
+            ggml_tensor * latent_b = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur_b);
+            ggml_tensor * k_rope_2d_b = ggml_mul_mat(ctx0, layer.wk_rope, cur_b);
+            ggml_tensor * k_rope_b = ggml_reshape_3d(ctx0, k_rope_2d_b, n_rot, n_kv_base, width);
+
+            // RoPE positions (section-major for M-RoPE)
+            ggml_tensor * pos_b = ggml_cont(ctx0, ggml_view_2d(ctx0, inp_pos, width, 4,
+                    (size_t) n_tokens*inp_pos->nb[0], (size_t) row0*inp_pos->nb[0]));
+            pos_b = ggml_reshape_1d(ctx0, pos_b, 4*width);
+
+            q_pe_b = ggml_rope_multi(ctx0, q_pe_b, pos_b, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow);
+            k_rope_b = ggml_rope_multi(ctx0, k_rope_b, pos_b, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow);
+
+            // Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, width]
+            ggml_tensor * latent_3d_b = ggml_reshape_3d(ctx0, latent_b, rank, 1, width);
+            ggml_tensor * k_rope_packed_b = ggml_reshape_2d(ctx0, k_rope_b, n_rot * n_kv_base, width);
+            ggml_tensor * K_packed_2d_b = ggml_concat(ctx0, latent_3d_b, k_rope_packed_b, 0);
+            ggml_tensor * K_packed_b = ggml_reshape_3d(ctx0, K_packed_2d_b, rank + n_rot * n_kv_base, 1, width);
+
+            // Store K in cache (no V cache for MLA)
+            ggml_tensor * k_idx_b = ggml_view_1d(ctx0, k_idxs, width, row0*k_idxs->nb[0]);
+            ggml_build_forward_expand(gf, mctx_kv->cpy_k(ctx0, K_packed_b, k_idx_b, il));
+
+            // Assemble Q = [Q_absorbed | q_pe_rope]
+            ggml_tensor * Q_full_b = ggml_concat(ctx0, Q_abs_b, q_pe_b, 0);
+
+            // Attention with MLA (V computed from latent via wv_b)
+            ggml_tensor * k_view = mctx_kv->get_k(ctx0, il);
+
+            cur_b = build_attn(inp_attn,
+                    nullptr, nullptr, nullptr,
+                    Q_full_b, k_view, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
+            cur_b = ggml_mul(ctx0, cur_b, ggml_sigmoid(ctx0, gate_b));
+            cur_b = build_lora_mm(layer.wo, cur_b, layer.wo_s);
+            cur_b = ggml_add(ctx0, cur_b, inpSA_b);
+
+            ggml_tensor * ffn_res_b = cur_b;
+            cur_b = build_norm(cur_b, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+            cur_b = qwen35mla_build_ffn(*this, layer, cur_b, il);
+            cur_b = ggml_add(ctx0, cur_b, ffn_res_b);
+
+            return cur_b;
+        };
+
+        int64_t n_catchup = 0;
+        while (n_catchup < n_tokens && ubatch.output && ubatch.output[n_catchup] == 0) {
+            n_catchup++;
+        }
+        const int64_t n_chain = n_tokens - n_catchup;
+        GGML_ASSERT(n_chain >= 1);
+
+        ggml_tensor * proj_all = build_proj(tok_embd, h_embd);
+
+        if (n_catchup > 0) {
+            ggml_tensor * proj_c = ggml_view_2d(ctx0, proj_all, proj_all->ne[0], n_catchup, proj_all->nb[1], 0);
+            build_block(proj_c, 0, n_catchup);
+        }
+
+        ggml_tensor * proj_cur = ggml_view_2d(ctx0, proj_all, proj_all->ne[0], 1, proj_all->nb[1], (size_t) n_catchup*proj_all->nb[1]);
+
+        ggml_tensor * logits_all = nullptr;
+        ggml_tensor * h_all      = nullptr;
+
+        for (int64_t j = 0; j < n_chain; ++j) {
+            ggml_tensor * cur_j = build_block(proj_cur, n_catchup + j, 1);
+
+            ggml_tensor * head_norm_w2 = layer.nextn.shared_head_norm
+                    ? layer.nextn.shared_head_norm
+                    : model.output_norm;
+            ggml_tensor * h_next_j = build_norm(cur_j, head_norm_w2, nullptr, LLM_NORM_RMS, -1);
+
+            ggml_tensor * head_w2 = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
+            ggml_tensor * head_s2 = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
+
+            static const int64_t n_sub_env = [] {
+                const char * env = getenv("LLAMA_SPEC_CHAIN_SUB");
+                return env != nullptr ? atoll(env) : 32768;
+            }();
+
+            ggml_tensor * id_map   = nullptr;
+            ggml_tensor * logits_j = build_draft_vocab_logits_chain(head_w2, head_s2, h_next_j);
+            if (logits_j != nullptr) {
+                id_map = draft_vocab_ids;
+            } else if (n_sub_env > 0 && n_sub_env < head_w2->ne[1] &&
+                    !(hadamard_rotations && hadamard_rotations->count(head_w2))) {
+                ggml_tensor * head_sub = ggml_view_2d(ctx0, head_w2,
+                        head_w2->ne[0], n_sub_env, head_w2->nb[1], 0);
+                logits_j = ggml_mul_mat(ctx0, head_sub, h_next_j);
+                if (head_s2 != nullptr) {
+                    logits_j = ggml_mul(ctx0, logits_j, head_s2);
+                }
+            } else {
+                logits_j = build_lora_mm(head_w2, h_next_j, head_s2);
+            }
+
+            ggml_tensor * id_j;
+            if (id_map) {
+                ggml_tensor * pos_j = ggml_argmax(ctx0, logits_j);
+                id_j = ggml_reshape_1d(ctx0, ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, id_map, 1, id_map->ne[0]), pos_j), 1);
+            } else {
+                id_j = ggml_argmax(ctx0, logits_j);
+            }
+            ggml_tensor * probs_j = ggml_soft_max(ctx0, logits_j);
+            ggml_tensor * p_j = ggml_get_rows(ctx0,
+                    ggml_reshape_2d(ctx0, probs_j, 1, probs_j->ne[0]), id_j);
+            p_j = ggml_reshape_2d(ctx0, p_j, 1, 1);
+            ggml_tensor * id_f = ggml_cast(ctx0, ggml_reshape_2d(ctx0, id_j, 1, 1), GGML_TYPE_F32);
+            ggml_tensor * out_j = ggml_concat(ctx0, id_f, p_j, 0);
+
+            logits_all = logits_all == nullptr ? out_j : ggml_concat(ctx0, logits_all, out_j, 1);
+            h_all      = h_all      == nullptr ? h_next_j : ggml_concat(ctx0, h_all, h_next_j, 1);
+
+            if (j + 1 < n_chain) {
+                ggml_tensor * tok_j = ggml_get_rows(ctx0, tok_embd_w, id_j);
+                tok_j = build_hadamard_inverse(tok_embd_w, tok_j);
+                proj_cur = build_proj(tok_j, h_next_j);
+            }
+        }
+
+        cb(h_all, "h_nextn", -1);
+        res->t_h_nextn = h_all;
+        ggml_build_forward_expand(gf, h_all);
+
+        ggml_build_forward_expand(gf, ggml_view_1d(ctx0, inp_out_ids, inp_out_ids->ne[0], 0));
+
+        cb(logits_all, "result_output", -1);
+        res->t_logits = logits_all;
+        ggml_build_forward_expand(gf, logits_all);
+
+        return;
+    }
+
+    // --- Single-step MTP path ---
+    ggml_tensor * h_norm = build_norm(h_embd, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+    cb(h_norm, "mtp_hnorm", il);
+
+    ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+    cb(e_norm, "mtp_enorm", il);
+
+    ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
+    cb(concat, "mtp_concat", il);
+
+    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat, layer.nextn.eh_proj_s);
+    cb(cur, "mtp_eh_proj", il);
+
+    ggml_tensor * inpSA = cur;
+
+    cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+    cb(cur, "mtp_attn_norm", il);
+
+    // MLA attention for MTP
+    const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
+    const int64_t n_head   = hparams.n_head();
+    const int64_t n_rot    = hparams.n_rot();
+    const int64_t qk_nope  = head_dim - n_rot;
+    const int64_t n_kv_base = 4;
+
+    ggml_tensor * Qcur_full = ggml_mul_mat(ctx0, layer.wqkv, cur);
+    cb(Qcur_full, "mtp_Qcur_full", il);
+
+    ggml_tensor * Qcur = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, n_tokens,
+        ggml_element_size(Qcur_full) * head_dim * 2,
+        ggml_element_size(Qcur_full) * head_dim * 2 * n_head, 0);
+    Qcur = build_norm(Qcur, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
+    cb(Qcur, "mtp_Qcur_normed", il);
+
+    ggml_tensor * gate = ggml_view_3d(ctx0, Qcur_full, head_dim, n_head, n_tokens,
+        ggml_element_size(Qcur_full) * head_dim * 2,
+        ggml_element_size(Qcur_full) * head_dim * 2 * n_head,
+        ggml_element_size(Qcur_full) * head_dim);
+    gate = ggml_cont_2d(ctx0, gate, head_dim * n_head, n_tokens);
+    cb(gate, "mtp_gate", il);
+
+    // Split Q
+    ggml_tensor * q_pe = ggml_view_3d(ctx0, Qcur, n_rot, n_head, n_tokens,
+        ggml_row_size(Qcur->type, head_dim),
+        ggml_row_size(Qcur->type, head_dim) * n_head, 0);
+    ggml_tensor * q_nope = ggml_view_3d(ctx0, Qcur, qk_nope, n_head, n_tokens,
+        ggml_row_size(Qcur->type, head_dim),
+        ggml_row_size(Qcur->type, head_dim) * n_head,
+        ggml_row_size(Qcur->type, n_rot));
+
+    // Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
+    ggml_tensor * wk_b_t = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
+    ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
+    ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
+    ggml_tensor * Q_abs = ggml_permute(ctx0, Q_abs_3d, 1, 0, 2, 3);
+    cb(Q_abs, "mtp_Q_absorbed", il);
+
+    // Latent + k_rope
+    ggml_tensor * latent = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
+    cb(latent, "mtp_latent", il);
+
+    ggml_tensor * k_rope_2d = ggml_mul_mat(ctx0, layer.wk_rope, cur);
+    ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
+
+    // RoPE
+    q_pe = ggml_rope_multi(ctx0, q_pe, inp_pos, nullptr,
+            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+            ext_factor, attn_factor, beta_fast, beta_slow);
+    k_rope = ggml_rope_multi(ctx0, k_rope, inp_pos, nullptr,
+            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+            ext_factor, attn_factor, beta_fast, beta_slow);
+
+    // Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, n_tokens]
+    ggml_tensor * latent_3d = ggml_reshape_3d(ctx0, latent, rank, 1, n_tokens);
+    ggml_tensor * k_rope_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
+    ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_3d, k_rope_packed, 0);
+    ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
+    cb(K_packed, "mtp_K_packed", il);
+
+    // Assemble Q = [Q_absorbed | q_pe_rope]
+    ggml_tensor * Q_full = ggml_concat(ctx0, Q_abs, q_pe, 0);
+    cb(Q_full, "mtp_Q_full", il);
+
+    // Attention with MLA (V computed from latent via wv_b)
+    cur = build_attn(inp_attn,
+            layer.wo, nullptr, layer.wo_s,
+            Q_full, K_packed, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
+    cb(cur, "mtp_attn_pregate", il);
+
+    cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate));
+    cur = build_lora_mm(layer.wo, cur, layer.wo_s);
+    cb(cur, "mtp_attn_out", il);
+
+    cur = ggml_add(ctx0, cur, inpSA);
+    cb(cur, "mtp_attn_residual", il);
+
+    ggml_tensor * ffn_residual = cur;
+    cur = build_norm(cur, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+    cb(cur, "mtp_attn_post_norm", il);
+
+    cur = qwen35mla_build_ffn(*this, layer, cur, il);
+    cb(cur, "mtp_ffn_out", il);
+
+    cur = ggml_add(ctx0, cur, ffn_residual);
+    cb(cur, "mtp_post_ffn", il);
+
+    ggml_tensor * head_norm_w = layer.nextn.shared_head_norm
+            ? layer.nextn.shared_head_norm
+            : model.output_norm;
+    GGML_ASSERT(head_norm_w && "QWEN35_MLA MTP: missing both nextn.shared_head_norm and output_norm");
+    cur = build_norm(cur, head_norm_w, nullptr, LLM_NORM_RMS, -1);
+
+    cb(cur, "h_nextn", -1);
+    res->t_h_nextn = cur;
+
+    cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+    cb(cur, "mtp_shared_head_norm", -1);
+
+    ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
+    ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
+    GGML_ASSERT(head_w && "QWEN35_MLA MTP: missing LM head (nextn.shared_head_head or model.output)");
+    ggml_tensor * logits = build_draft_vocab_logits(head_w, head_s, cur);
+    cur = logits ? logits : build_lora_mm(head_w, cur, head_s);
+    cb(cur, "result_output", -1);
+
+    res->t_logits = cur;
+    ggml_build_forward_expand(gf, cur);
 }
