@@ -44,7 +44,7 @@ template <int WTYPE>
 __global__ void __launch_bounds__(tc::NTHREADS)
 mul_mat_q_tc_kernel(
     const uint8_t * __restrict__ W,   // quantized weights [N, K] row-major
-    const __half  * __restrict__ A,   // FP16 hperm activations [K, ntok] col-major
+    const float   * __restrict__ A,   // FP32 activations [K, ntok] col-major
     float         * __restrict__ C,   // output [N, ntok] col-major (FP32)
     int N, int K, int ntok)
 {
@@ -123,18 +123,26 @@ mul_mat_q_tc_kernel(
             }
         }
 
-        // --- Activations ---
+        // --- Activations (FP32 global -> FP16 smem, in registers) ---
         {
             __half * dst = a_smem + stage * BN * BK;
-            const __half * g = A + k0;
-            const int tok0  = block_tok + tid / 2;
-            const int koff  = (tid % 2) * 32;
-            if (tok0 < block_tok + BN && tok0 < ntok) {
+            const float * g = A + k0;
+            const int tok_local = tid / 2;
+            const int koff      = (tid % 2) * 32;
+            const int tok0      = block_tok + tok_local;
+            if (tok0 < ntok) {
                 #pragma unroll
                 for (int i = 0; i < 4; i++) {
-                    __pipeline_memcpy_async(
-                        dst + (tok0 - block_tok) * BK + koff + i * 16,
-                        g + (size_t)tok0 * K + koff + i * 16, 16);
+                    // Load 8 consecutive floats (2 x float4)
+                    const float4 * gf = reinterpret_cast<const float4*>(g + (size_t)tok0 * K + koff + i * 8);
+                    float4 f0 = gf[0];
+                    float4 f1 = gf[1];
+                    // Convert to half2 and store
+                    __half2 * dh = reinterpret_cast<__half2*>(dst + tok_local * BK + koff + i * 8);
+                    dh[0] = __halves2half2(__float2half_rn(f0.x), __float2half_rn(f0.y));
+                    dh[1] = __halves2half2(__float2half_rn(f0.z), __float2half_rn(f0.w));
+                    dh[2] = __halves2half2(__float2half_rn(f1.x), __float2half_rn(f1.y));
+                    dh[3] = __halves2half2(__float2half_rn(f1.z), __float2half_rn(f1.w));
                 }
             }
         }
