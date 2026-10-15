@@ -999,13 +999,13 @@ class GGUFWriter:
         self.add_uint32(Keys.Attention.KV_LORA_RANK.format(arch=self.arch), length)
 
     def add_kv_lora_rank_mla(self, rank_arr: list[int]) -> None:
-        self.add_uint32_array(Keys.Attention.KV_LORA_RANK_MLA.format(arch=self.arch), rank_arr)
+        self.add_array(Keys.Attention.KV_LORA_RANK_MLA.format(arch=self.arch), rank_arr)
 
     def add_qk_rope_head_dim_mla(self, length: int) -> None:
         self.add_uint32(Keys.Attention.QK_ROPE_HEAD_DIM_MLA.format(arch=self.arch), length)
 
     def add_rope_keep_mla(self, keep: list[int]) -> None:
-        self.add_uint32_array(Keys.Rope.KEEP_MLA.format(arch=self.arch), keep)
+        self.add_array(Keys.Rope.KEEP_MLA.format(arch=self.arch), keep)
 
     def add_rope_keep_count_mla(self, count: int) -> None:
         self.add_uint32(Keys.Rope.KEEP_COUNT_MLA.format(arch=self.arch), count)
