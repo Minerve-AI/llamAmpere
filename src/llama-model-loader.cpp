@@ -540,6 +540,7 @@ namespace GGUFMeta {
     template bool llama_model_loader::get_key_or_arr<std::array<int,      3>>  (enum llm_kv kid, std::array<int,      3>   & result, uint32_t n, bool required);
     template bool llama_model_loader::get_key_or_arr<std::array<int,      5>>  (enum llm_kv kid, std::array<int,      5>   & result, uint32_t n, bool required);
     template bool llama_model_loader::get_key_or_arr<std::array<int,      6>>  (enum llm_kv kid, std::array<int,      6>   & result, uint32_t n, bool required);
+    template bool llama_model_loader::get_key_or_arr<std::array<uint32_t, 32>> (enum llm_kv kid, std::array<uint32_t, 32> & result, uint32_t n, bool required);
 
 
 llama_model_loader::llama_model_loader(
