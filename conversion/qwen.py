@@ -699,22 +699,23 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
 
     def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
         """Override tensor name mapping for MLA-specific tensors."""
-        # MLA: q_proj → attn_qkv (fused Q+gate, [n_embd, head_dim*n_head*2])
-        # The C++ model's create_tensor_qkv() looks for ATTN_QKV first.
-        if name.endswith(".self_attn.q_proj.weight"):
-            return name.replace(".self_attn.q_proj.weight", ".attn_qkv.weight")
-        # MLA: kv_a_proj → attn_kv_a_mqa (latent projection, [n_embd, rank])
-        if name.endswith(".kv_a_proj.weight"):
-            return name.replace(".kv_a_proj.weight", ".attn_kv_a_mqa.weight")
-        # MLA: k_rope_proj → attn_k_rope_proj (per-KV-head rope key, [n_embd, n_head_kv*rope_dim])
-        if name.endswith(".k_rope_proj.weight"):
-            return name.replace(".k_rope_proj.weight", ".attn_k_rope_proj.weight")
-        # MLA: k_up_proj → attn_k_b (K up-projection from latent, [rank, qk_nope, n_head])
-        if name.endswith(".k_up_proj.weight"):
-            return name.replace(".k_up_proj.weight", ".attn_k_b.weight")
-        # MLA: v_up_proj → attn_v_b (V up-projection from latent, [rank, head_dim, n_head])
-        if name.endswith(".v_up_proj.weight"):
-            return name.replace(".v_up_proj.weight", ".attn_v_b.weight")
+        import re as _re
+        # MLA-specific tensors: extract layer index and build proper blk.{i}.* name
+        mla_map = {
+            ".self_attn.q_proj.weight":    ".attn_qkv.weight",
+            ".self_attn.k_proj.weight":    ".attn_k.weight",
+            ".self_attn.v_proj.weight":    ".attn_v.weight",
+            ".kv_a_proj.weight":            ".attn_kv_a_mqa.weight",
+            ".k_rope_proj.weight":          ".attn_k_rope_proj.weight",
+            ".k_up_proj.weight":            ".attn_k_b.weight",
+            ".v_up_proj.weight":            ".attn_v_b.weight",
+        }
+        for suffix, gguf_suffix in mla_map.items():
+            if name.endswith(suffix):
+                m = _re.match(r"model\.layers\.(\d+)\.", name)
+                if m:
+                    bid = m.group(1)
+                    return f"blk.{bid}{gguf_suffix}"
         # Default: use parent mapping
         return super().map_tensor_name(name, try_suffixes)
 
