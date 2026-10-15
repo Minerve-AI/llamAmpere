@@ -697,22 +697,22 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             self.gguf_writer.add_rope_keep_mla([int(x) for x in mla_rope_keep])
             self.gguf_writer.add_rope_keep_count_mla(len(mla_rope_keep))
 
-    def _map_tensor_name(self, name: str, to_suffix: str) -> tuple[str, str] | None:
+    def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
         """Override tensor name mapping for MLA-specific tensors."""
         # MLA: kv_a_proj → attn_kv_a_mqa (latent projection, [n_embd, rank])
         if name.endswith(".kv_a_proj.weight"):
-            return name.replace(".kv_a_proj.weight", ".attn_kv_a_mqa.weight"), to_suffix
+            return name.replace(".kv_a_proj.weight", ".attn_kv_a_mqa.weight")
         # MLA: k_rope_proj → attn_k_rope_proj (per-KV-head rope key, [n_embd, n_head_kv*rope_dim])
         if name.endswith(".k_rope_proj.weight"):
-            return name.replace(".k_rope_proj.weight", ".attn_k_rope_proj.weight"), to_suffix
+            return name.replace(".k_rope_proj.weight", ".attn_k_rope_proj.weight")
         # MLA: k_up_proj → attn_k_b (K up-projection from latent, [rank, qk_nope, n_head])
         if name.endswith(".k_up_proj.weight"):
-            return name.replace(".k_up_proj.weight", ".attn_k_b.weight"), to_suffix
+            return name.replace(".k_up_proj.weight", ".attn_k_b.weight")
         # MLA: v_up_proj → attn_v_b (V up-projection from latent, [rank, head_dim, n_head])
         if name.endswith(".v_up_proj.weight"):
-            return name.replace(".v_up_proj.weight", ".attn_v_b.weight"), to_suffix
+            return name.replace(".v_up_proj.weight", ".attn_v_b.weight")
         # Default: use parent mapping
-        return super()._map_tensor_name(name, to_suffix)
+        return super().map_tensor_name(name, try_suffixes)
 
 
 @ModelBase.register("DFlashDraftModel", "DFlash2DraftModel")
