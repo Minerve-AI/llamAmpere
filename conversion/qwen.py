@@ -699,6 +699,10 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
 
     def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
         """Override tensor name mapping for MLA-specific tensors."""
+        # MLA: q_proj → attn_qkv (fused Q+gate, [n_embd, head_dim*n_head*2])
+        # The C++ model's create_tensor_qkv() looks for ATTN_QKV first.
+        if name.endswith(".self_attn.q_proj.weight"):
+            return name.replace(".self_attn.q_proj.weight", ".attn_qkv.weight")
         # MLA: kv_a_proj → attn_kv_a_mqa (latent projection, [n_embd, rank])
         if name.endswith(".kv_a_proj.weight"):
             return name.replace(".kv_a_proj.weight", ".attn_kv_a_mqa.weight")
