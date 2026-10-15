@@ -2142,7 +2142,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // Tensor-core GEMM path for prefill (batch >= 128) with Q4_K / Q8_0 weights on sm_86+.
     // Converts the FP32 activation to FP16 (hperm) in a temporary pool buffer, then runs the
     // tensor-core kernel. Falls back to MMQ below when any condition is not met.
-    if (ne11 >= 128
+    // TC GEMM disabled: FP16 activation buffer causes OOM on 24GB GPUs with 27B models.
+    // Re-enable after fixing the activation conversion to use in-kernel FP32->FP16 (no temp buffer).
+    if (false
+            && ne11 >= 128
             && (src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q8_0)
             && src1->type == GGML_TYPE_F32
             && dst->type == GGML_TYPE_F32
