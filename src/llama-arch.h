@@ -611,6 +611,7 @@ enum llm_tensor {
     LLM_TENSOR_ATTN_K_B,
     LLM_TENSOR_ATTN_V_B,
     LLM_TENSOR_ATTN_K_B_RAW,  // Qwen3.8-MLA: unscaled K up-projection for RMS computation
+    LLM_TENSOR_ATTN_K_ROPE_PROJ, // Qwen3.8-MLA: per-KV-head rope key projection
     LLM_TENSOR_ATTN_Q_A_NORM,
     LLM_TENSOR_ATTN_KV_A_NORM,
     LLM_TENSOR_HC_HEAD_FN,
