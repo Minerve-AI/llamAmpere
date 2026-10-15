@@ -679,8 +679,8 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         # MLA-specific parameters
         mla_ranks = text_cfg.get("mla_ranks", {})
         if mla_ranks:
-            # Convert dict {layer_idx: rank} to array
-            n_layers = text_cfg.get("num_hidden_layers", 64)
+            # Convert dict {layer_idx: rank} to array (length = block_count incl. MTP)
+            n_layers = self.block_count
             rank_arr = [0] * n_layers
             for k, v in mla_ranks.items():
                 il = int(k)
