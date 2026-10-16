@@ -734,7 +734,7 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    auto * inp_attn = build_attn_inp_k();
+    auto * inp_attn = build_attn_inp_kv();
 
     const float kq_scale = hparams.f_attention_scale == 0.0f
             ? 1.0f / sqrtf(float(head_dim)) : hparams.f_attention_scale;
@@ -746,6 +746,7 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
         ggml_tensor * k_idxs = inp_attn->get_k_idxs();
+        ggml_tensor * v_idxs = inp_attn->get_v_idxs();
 
         // If MTP projection is available, use it; otherwise just use the hidden state
         auto build_proj = [&](ggml_tensor * tok_in, ggml_tensor * h_in) -> ggml_tensor * {
@@ -800,9 +801,11 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
             ggml_tensor * k_view = mctx_kv->get_k(ctx0, il);
             ggml_tensor * v_view = mctx_kv->get_v(ctx0, il);
 
-            cur_b = build_attn(inp_attn,
-                    nullptr, nullptr, nullptr,
-                    Q_b, k_view, v_view, nullptr, nullptr, nullptr, kq_scale, il);
+            ggml_tensor * kq_mask = inp_attn->get_kq_mask();
+            const int64_t n_kv = kq_mask->ne[0];
+            ggml_tensor * mask_b = ggml_view_2d(ctx0, kq_mask, n_kv, width, kq_mask->nb[1], (size_t) row0*kq_mask->nb[1]);
+
+            cur_b = build_attn_mha(Q_b, k_view, v_view, nullptr, mask_b, nullptr, nullptr, 0, kq_scale, il);
             cur_b = build_lora_mm(layer.wo, cur_b, layer.wo_s);
             cur_b = ggml_add(ctx0, cur_b, inpSA_b);
 
