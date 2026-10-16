@@ -115,10 +115,10 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
         } else if (!hparams.is_recr(il)) {
             // Full-attention MLA layer
             const int64_t rank     = hparams.mla_kv_lora_rank_arr[il];
-            const int64_t rope_dim = hparams.n_rot(); // 64 (full rope dim for cache)
+            const int64_t rope_dim = hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot();
             const int64_t n_head   = hparams.n_head();
             const int64_t head_dim = hparams.n_embd_head_v();
-            const int64_t qk_nope  = head_dim - hparams.n_rot();
+            const int64_t qk_nope  = head_dim - rope_dim;
 
             GGML_ASSERT(rank > 0 && "MLA layer must have a latent rank");
 
@@ -314,8 +314,8 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     const int64_t rank      = hparams.mla_kv_lora_rank_arr[il];
     const int64_t head_dim  = hparams.n_embd_head_v();   // 256
     const int64_t n_head    = hparams.n_head();           // 24
-    const int64_t n_rot     = hparams.n_rot();            // 64
-    const int64_t qk_nope   = head_dim - n_rot;           // 192
+    const int64_t n_rot     = hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot();
+    const int64_t qk_nope   = head_dim - n_rot;
     const int64_t n_kv_base = 4;                          // base model KV heads for rope
 
     GGML_ASSERT(rank > 0);
