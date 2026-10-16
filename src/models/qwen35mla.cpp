@@ -137,14 +137,14 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
             const int64_t n_head_kv_base = 4; // base model KV heads
             layer.wk_rope = create_tensor(tn(LLM_TENSOR_ATTN_K_ROPE_PROJ, "weight", il), { n_embd, n_head_kv_base * rope_dim }, flags);
 
-            // MLA: K up-projection [rank, qk_nope, n_head]
-            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", il), { rank, qk_nope, n_head }, flags);
+            // MLA: K up-projection [rank, qk_nope * n_head] (stored flat, reshaped in compute)
+            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", il), { rank, qk_nope * n_head }, flags);
 
-            // MLA: V up-projection [rank, head_dim, n_head]
-            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", il), { rank, head_dim, n_head }, flags);
+            // MLA: V up-projection [rank, head_dim * n_head] (stored flat, reshaped in compute)
+            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", il), { rank, head_dim * n_head }, flags);
 
             // MLA: unscaled K up-projection for RMS computation (optional)
-            layer.wk_b_raw = create_tensor(tn(LLM_TENSOR_ATTN_K_B_RAW, "weight", il), { rank, qk_nope, n_head },
+            layer.wk_b_raw = create_tensor(tn(LLM_TENSOR_ATTN_K_B_RAW, "weight", il), { rank, qk_nope * n_head },
                                            TENSOR_NOT_REQUIRED | flags);
         } else {
             // Linear attention (gated delta net) - same as qwen35
@@ -356,18 +356,21 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     cb(q_nope, "q_nope", il);
 
     //
-    // 3. Q absorption: Q_absorbed = wk_b^T @ q_nope (per-head)
-    //    wk_b: [rank, qk_nope, n_head]
+    // 3. Q absorption: Q_absorbed[d,h,t] = sum_p W_UK[h][d,p] * q_nope[p,h,t]
+    //    wk_b GGUF: [rank, N*P] where W[d, h*P+p] = W_UK[h][d,p]
     //    Result: [rank, n_head, n_tokens]
     //
     {
-        // Permute wk_b: [rank, qk_nope, n_head] → [qk_nope, n_head, rank]
-        ggml_tensor * wk_b_t = ggml_permute(ctx0, layer.wk_b, 1, 2, 0, 3);
-        // Permute q_nope: [qk_nope, n_head, n_tokens] → [qk_nope, n_tokens, n_head]
+        // Reshape wk_b: [r, N*P] → [r, P, N]  (W_reshaped[d,p,h] = W[d, h*P+p])
+        ggml_tensor * wk_b_3d = ggml_reshape_3d(ctx0, layer.wk_b, rank, qk_nope, n_head);
+        // Permute: [r, P, N] → [P, r, N]  (A[p,d,h] = W_UK[h][d,p])
+        ggml_tensor * wk_b_t = ggml_permute(ctx0, wk_b_3d, 1, 0, 2, 3);
+        // Permute q_nope: [P, N, n_tokens] → [P, n_tokens, N]  (B[p,t,h] = q_nope[p,h,t])
         ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
-        // Batched matmul: [n_head, rank, n_tokens] → reshape to [rank, n_head, n_tokens]
-        ggml_tensor * Q_absorbed_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
-        ggml_tensor * Q_absorbed = ggml_permute(ctx0, Q_absorbed_3d, 1, 0, 2, 3);
+        // Batched matmul: result[d,t,h] = sum_p A[p,d,h]*B[p,t,h] → [r, n_tokens, N]
+        ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
+        // Permute: [r, n_tokens, N] → [r, N, n_tokens]
+        ggml_tensor * Q_absorbed = ggml_permute(ctx0, Q_abs_3d, 0, 2, 1, 3);
         cb(Q_absorbed, "Q_absorbed", il);
 
         //
@@ -417,13 +420,21 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
 
         //
         // 7. Attention with MLA (V computed from latent via wv_b)
-        //    The build_attn with v_mla computes V = wv_b @ latent internally
+        //    V is a view of K_packed (latent part), v_mla decompresses MQA→MHA
         //
         const float kq_scale = 1.0f / sqrtf(float(head_dim));
 
+        // V = latent part of K_packed: [rank, 1, n_tokens]
+        ggml_tensor * V_latent = ggml_view_3d(ctx0, K_packed, rank, 1, n_tokens,
+            K_packed->nb[1], K_packed->nb[2], 0);
+        cb(V_latent, "V_latent", il);
+
+        // Reshape wv_b: [rank, head_dim*n_head] → [rank, head_dim, n_head] for v_mla
+        ggml_tensor * wv_b_3d = ggml_reshape_3d(ctx0, layer.wv_b, rank, head_dim, n_head);
+
         ggml_tensor * attn_out = build_attn(inp,
                     layer.wo, nullptr, layer.wo_s,
-                    Q_full, K_packed, nullptr, nullptr, nullptr, layer.wv_b, kq_scale, il);
+                    Q_full, K_packed, V_latent, nullptr, nullptr, wv_b_3d, kq_scale, il);
         cb(attn_out, "attn_out", il);
 
         //
