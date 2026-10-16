@@ -2780,6 +2780,14 @@ struct ggml_tensor * ggml_concat(
             ne[d] = a->ne[d] + b->ne[d];
             continue;
         }
+        if (a->ne[d] != b->ne[d]) {
+            fprintf(stderr, "[GGML-CONCAT-DEBUG] MISMATCH at dim %d: a->ne[%d]=%ld b->ne[%d]=%ld\n",
+                    d, d, a->ne[d], d, b->ne[d]);
+            fprintf(stderr, "[GGML-CONCAT-DEBUG] a: name='%s' ne=[%ld,%ld,%ld,%ld] type=%d op=%d\n",
+                    a->name, a->ne[0], a->ne[1], a->ne[2], a->ne[3], a->type, a->op);
+            fprintf(stderr, "[GGML-CONCAT-DEBUG] b: name='%s' ne=[%ld,%ld,%ld,%ld] type=%d op=%d\n",
+                    b->name, b->ne[0], b->ne[1], b->ne[2], b->ne[3], b->type, b->op);
+        }
         GGML_ASSERT(a->ne[d] == b->ne[d]);
         ne[d] = a->ne[d];
     }

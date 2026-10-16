@@ -915,6 +915,19 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
         ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
         cb(e_norm, "mtp_enorm", il);
 
+        fprintf(stderr, "[MTP-DEBUG] e_norm: ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
+                e_norm->ne[0], e_norm->ne[1], e_norm->ne[2], e_norm->ne[3],
+                e_norm->nb[0], e_norm->nb[1], e_norm->nb[2], e_norm->nb[3]);
+        fprintf(stderr, "[MTP-DEBUG] h_norm: ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
+                h_norm->ne[0], h_norm->ne[1], h_norm->ne[2], h_norm->ne[3],
+                h_norm->nb[0], h_norm->nb[1], h_norm->nb[2], h_norm->nb[3]);
+        fprintf(stderr, "[MTP-DEBUG] tok_embd: ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
+                tok_embd->ne[0], tok_embd->ne[1], tok_embd->ne[2], tok_embd->ne[3],
+                tok_embd->nb[0], tok_embd->nb[1], tok_embd->nb[2], tok_embd->nb[3]);
+        fprintf(stderr, "[MTP-DEBUG] h_embd:   ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
+                h_embd->ne[0], h_embd->ne[1], h_embd->ne[2], h_embd->ne[3],
+                h_embd->nb[0], h_embd->nb[1], h_embd->nb[2], h_embd->nb[3]);
+
         ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
         cb(concat, "mtp_concat", il);
 
