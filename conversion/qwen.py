@@ -694,7 +694,10 @@ class Qwen3_5MLATextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
 
         mla_rope_keep = text_cfg.get("mla_rope_keep", [])
         if mla_rope_keep:
-            self.gguf_writer.add_rope_keep_mla([int(x) for x in mla_rope_keep])
+            # C++ expects fixed-size array of 32 (std::array<uint32_t, 32>)
+            keep_arr = [int(x) for x in mla_rope_keep]
+            keep_arr += [0] * (32 - len(keep_arr))
+            self.gguf_writer.add_rope_keep_mla(keep_arr)
             self.gguf_writer.add_rope_keep_count_mla(len(mla_rope_keep))
 
     def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
