@@ -104,6 +104,9 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
             const int64_t n_head_kv = hparams.n_head_kv();
             const int64_t head_dim  = hparams.n_embd_head_v();
 
+            fprintf(stderr, "[DEBUG MTP] il=%d n_head=%ld n_head_kv=%ld head_dim=%ld n_embd=%ld\n",
+                    il, n_head, n_head_kv, head_dim, n_embd);
+
             // Fused Q+gate: [n_embd, 2 * n_head * head_dim]
             layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", il), { n_embd, head_dim * n_head * 2 }, flags);
             // Separate K and V: [n_embd, n_head_kv * head_dim]
