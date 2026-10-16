@@ -351,7 +351,9 @@ llama_kv_cache::llama_kv_cache(
 
 
         const bool has_k = true;
-        const bool has_v = !is_mla;
+        // MLA layers: V computed from latent at attention time (not stored).
+        // MTP layer (il >= n_layer): standard GQA, needs a real V buffer.
+        const bool has_v = !is_mla || il >= hparams.n_layer();
 
         // Layer-adaptive: use higher precision for quality-sensitive layers.
         // See kv_adaptive_mode above for the mode legend and env var.
