@@ -107,9 +107,6 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
             layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", il), { n_embd, head_dim * n_head * 2 }, flags);
             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_head * head_dim, n_embd }, flags);
 
-            // MTP: embedding hidden projection
-            create_tensor(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", il), { n_embd, n_embd }, flags);
-
             // Q/K normalization
             layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { head_dim }, flags);
             layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", il), { head_dim }, flags);
