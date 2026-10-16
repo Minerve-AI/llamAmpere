@@ -54,10 +54,15 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
         hparams.n_embd_head_v_mla_impl = max_rank; // V dim (latent), not actually stored
 
         // KV cache uses single "head" (MQA): the latent is shared across all Q heads
-        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
+        // Only applies to main model layers, NOT the MTP layer (which uses standard GQA)
+        for (uint32_t i = 0; i < hparams.n_layer(); ++i) {
             if (!hparams.is_recr(i)) {
                 hparams.n_head_kv_arr[i] = 1;
             }
+        }
+        // MTP layer uses standard GQA with the base model's KV head count
+        if (hparams.n_layer_nextn > 0) {
+            hparams.n_head_kv_arr[hparams.n_layer()] = n_kv_base; // 4 KV heads
         }
     }
 
@@ -101,11 +106,8 @@ void llama_model_qwen35mla::load_arch_tensors(llama_model_loader & ml) {
         if (il >= n_layer) {
             // MTP layer: fused Q+gate stored as attn_q, separate K and V
             const int64_t n_head    = hparams.n_head();
-            const int64_t n_head_kv = hparams.n_head_kv();
+            const int64_t n_head_kv = hparams.n_head_kv(il); // MTP: 4 (set above), not 1
             const int64_t head_dim  = hparams.n_embd_head_v();
-
-            fprintf(stderr, "[DEBUG MTP] il=%d n_head=%ld n_head_kv=%ld head_dim=%ld n_embd=%ld\n",
-                    il, n_head, n_head_kv, head_dim, n_embd);
 
             // Fused Q+gate: [n_embd, 2 * n_head * head_dim]
             layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", il), { n_embd, head_dim * n_head * 2 }, flags);
@@ -693,9 +695,8 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
 
     const int64_t head_dim = hparams.n_embd_head_v();
     const int64_t n_head   = hparams.n_head();
-    const int64_t n_head_kv = hparams.n_head_kv();
-
     const int il = hparams.n_layer();
+    const int64_t n_head_kv = hparams.n_head_kv(il); // MTP layer: 4 KV heads
     const auto & layer = model.layers[il];
 
     // MTP-specific tensors are optional - if absent, use hidden state directly
