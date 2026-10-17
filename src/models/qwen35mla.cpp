@@ -63,6 +63,16 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
         // MTP layer uses standard GQA with the base model's KV head count
         if (hparams.n_layer_nextn > 0) {
             hparams.n_head_kv_arr[hparams.n_layer()] = n_kv_base; // 4 KV heads
+            // Set n_embd_head_v_full for MTP layer (standard GQA, not MLA)
+            // The base model's head dim is read from GGUF or derived
+            ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH, hparams.n_embd_head_v_full, false);
+            if (hparams.n_embd_head_v_full == 0) {
+                // Fallback: derive from n_embd / n_head_base
+                // Qwen35-27B: n_embd=4096, n_head_base=16 -> head_dim=256
+                hparams.n_embd_head_v_full = hparams.n_embd / 16;
+                LLAMA_LOG_WARN("%s: ATTENTION_VALUE_LENGTH not set, derived n_embd_head_v_full = %u\n",
+                               __func__, hparams.n_embd_head_v_full);
+            }
         }
     }
 

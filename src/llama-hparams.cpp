@@ -155,7 +155,9 @@ uint32_t llama_hparams::n_embd_head_v(uint32_t il) const {
 
 uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
     const uint32_t n_head_kv = this->n_head_kv(il);
-    const uint32_t head_k = is_mla() ? n_embd_head_k_mla() : n_embd_head_k(il);
+    // MTP layers (il >= n_layer) use standard GQA, not MLA
+    const bool use_mla = is_mla() && il < n_layer();
+    const uint32_t head_k = use_mla ? n_embd_head_k_mla() : n_embd_head_k(il);
 
     return head_k * n_head_kv;
 }
