@@ -422,6 +422,18 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
+        // For MLA models, if K dim is not a multiple of the quantization block size,
+        // fall back to F16 to avoid ggml_row_size / nb[1] mismatch.
+        if (is_mla && has_k) {
+            const uint32_t blck = ggml_blck_size(layer_type_k);
+            if (blck > 1 && n_embd_k_gqa_eff % blck != 0) {
+                LLAMA_LOG_INFO("%s: MLA K dim %u not multiple of block %u, using F16
+",
+                               __func__, n_embd_k_gqa_eff, blck);
+                layer_type_k = GGML_TYPE_F16;
+            }
+        }
+
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
 
