@@ -437,8 +437,10 @@ llama_kv_cache::llama_kv_cache(
 
         for (uint32_t s = 0; s < n_stream; ++s) {
             if (has_k) {
-                LLAMA_LOG_DEBUG("%s: layer %3d: K view s=%u: [%u,%u] nb[1]=%zu nb[2]=%zu off=%zu nbytes=%zu\n",
-                    __func__, il, s, n_embd_k_gqa_eff, kv_size, k->nb[1], k->nb[2], s*k->nb[2], ggml_nbytes(k));
+                const size_t row_size = ggml_row_size(k->type, n_embd_k_gqa_eff);
+                const size_t view_data_size = row_size * kv_size;
+                LLAMA_LOG_DEBUG("%s: layer %3d: K view s=%u: [%u,%u] nb[1]=%zu row_size=%zu view_data=%zu off=%zu nbytes=%zu type=%d\n",
+                    __func__, il, s, n_embd_k_gqa_eff, kv_size, k->nb[1], row_size, view_data_size, s*k->nb[2], ggml_nbytes(k), (int)k->type);
             }
             k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa_eff, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
             if (has_v) {
