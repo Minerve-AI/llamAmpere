@@ -422,6 +422,19 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
+        // For quantized types, pad K dim to next multiple of block size
+        // (ggml_row_size and nb[1] disagree when ne[0] % blck_size != 0)
+        {
+            const uint32_t blck = ggml_blck_size(layer_type_k);
+            if (blck > 1 && n_embd_k_gqa_eff % blck != 0) {
+                n_embd_k_gqa_eff = ((n_embd_k_gqa_eff + blck - 1) / blck) * blck;
+                if (il == 0) {
+                    LLAMA_LOG_INFO("%s: quantized K padding: %u -> %u (block=%u)\n",
+                                   __func__, n_embd_k_gqa, n_embd_k_gqa_eff, blck);
+                }
+            }
+        }
+
         LLAMA_LOG_DEBUG("%s: layer %3d: K=[%u,%u,%u] V=[%u,%u,%u] has_k=%d has_v=%d n_embd_k_gqa=%u n_embd_v_gqa=%u\n",
             __func__, il, n_embd_k_gqa_eff, kv_size, n_stream, n_embd_v_gqa_eff, kv_size, n_stream,
             (int)has_k, (int)has_v, n_embd_k_gqa, n_embd_v_gqa);
