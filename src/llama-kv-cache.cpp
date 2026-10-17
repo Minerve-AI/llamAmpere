@@ -422,6 +422,10 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
+        LLAMA_LOG_DEBUG("%s: layer %3d: K=[%u,%u,%u] V=[%u,%u,%u] has_k=%d has_v=%d n_embd_k_gqa=%u n_embd_v_gqa=%u\n",
+            __func__, il, n_embd_k_gqa_eff, kv_size, n_stream, n_embd_v_gqa_eff, kv_size, n_stream,
+            (int)has_k, (int)has_v, n_embd_k_gqa, n_embd_v_gqa);
+
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
 
