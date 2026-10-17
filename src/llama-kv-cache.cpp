@@ -436,7 +436,15 @@ llama_kv_cache::llama_kv_cache(
         std::vector<ggml_tensor *> v_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
+            if (has_k) {
+                LLAMA_LOG_DEBUG("%s: layer %3d: K view s=%u: [%u,%u] nb[1]=%zu nb[2]=%zu off=%zu nbytes=%zu\n",
+                    __func__, il, s, n_embd_k_gqa_eff, kv_size, k->nb[1], k->nb[2], s*k->nb[2], ggml_nbytes(k));
+            }
             k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa_eff, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
+            if (has_v) {
+                LLAMA_LOG_DEBUG("%s: layer %3d: V view s=%u: [%u,%u] nb[1]=%zu nb[2]=%zu off=%zu nbytes=%zu\n",
+                    __func__, il, s, n_embd_v_gqa_eff, kv_size, v->nb[1], v->nb[2], s*v->nb[2], ggml_nbytes(v));
+            }
             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa_eff, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
         }
 
