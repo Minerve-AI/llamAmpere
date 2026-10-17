@@ -1727,6 +1727,11 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
         k = ggml_reshape_2d(ctx, k, n_embd_gqa, kv_size*n_stream);
     }
 
+    // Pad k_cur to match cache K dim if quantized padding was applied
+    if (k_cur->ne[0] < k->ne[0]) {
+        k_cur = ggml_pad(ctx, k_cur, k->ne[0] - k_cur->ne[0], 0, 0, 0);
+    }
+
     // store the current K values into the cache
     ggml_tensor * result = ggml_set_rows(ctx, k, k_cur, k_idxs);
 
