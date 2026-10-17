@@ -410,11 +410,11 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         //    The KV cache stores this packed tensor (MQA, single "head")
         //
         // Reshape latent to 3D: [rank, 1, n_tokens]
-        ggml_tensor * latent_3d = ggml_reshape_3d(ctx0, latent, rank, 1, n_tokens);
+        ggml_tensor * latent_2d = ggml_reshape_2d(ctx0, latent, rank, n_tokens);
         // Reshape k_rope to 2D: [n_rot*n_kv_base, n_tokens]
         ggml_tensor * k_rope_2d_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
         // Concatenate: [rank + n_rot*n_kv_base, n_tokens]
-        ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_3d, k_rope_2d_packed, 0);
+        ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_2d, k_rope_2d_packed, 0);
         // Reshape to [rank + n_rot*n_kv_base, 1, n_tokens] for KV cache
         ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
         cb(K_packed, "K_packed", il);
