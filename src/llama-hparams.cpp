@@ -155,8 +155,9 @@ uint32_t llama_hparams::n_embd_head_v(uint32_t il) const {
 
 uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
     const uint32_t n_head_kv = this->n_head_kv(il);
+    const uint32_t head_k = is_mla() ? n_embd_head_k_mla() : n_embd_head_k(il);
 
-    return n_embd_head_k(il) * n_head_kv;
+    return head_k * n_head_kv;
 }
 
 uint32_t llama_hparams::n_embd_v_gqa(uint32_t il) const {

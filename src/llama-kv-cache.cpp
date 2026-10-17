@@ -303,8 +303,8 @@ llama_kv_cache::llama_kv_cache(
         }
 
         if (n_embd_head_k_all == 0) {
-            n_embd_head_k_all = (int32_t) hparams.n_embd_head_k(il);
-        } else if (n_embd_head_k_all > 0 && n_embd_head_k_all != (int32_t) hparams.n_embd_head_k(il)) {
+            n_embd_head_k_all = (int32_t) (is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il));
+        } else if (n_embd_head_k_all > 0 && n_embd_head_k_all != (int32_t) (is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il))) {
             n_embd_head_k_all = -1;
         }
 
@@ -347,7 +347,7 @@ llama_kv_cache::llama_kv_cache(
         // head_dim_k=192), pad each head to the next multiple of 128. The padded zeros don't
         // affect dot products since WHT preserves inner products:
         //   <WHT(Q_padded), WHT(K_padded)> = <Q_padded, K_padded> = <Q, K> + <0, 0> = <Q, K>
-        const uint32_t n_embd_head_k = hparams.n_embd_head_k(il);
+        const uint32_t n_embd_head_k = is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
 
 
         const bool has_k = true;
@@ -1606,7 +1606,7 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     }
 
     // Use padded head_dim for turbo types so the full padded data is returned
-    const uint32_t head_k = hparams.n_embd_head_k(il);
+    const uint32_t head_k = is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
     const uint32_t head_k_eff = (k_is_turbo && head_k % 128 != 0)
         ? ((head_k + 127) / 128) * 128 : head_k;
 
@@ -2424,7 +2424,7 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
         const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
 
         const auto n_rot         = hparams.n_rot(il);
-        const auto n_embd_head_k = hparams.n_embd_head_k(il);
+        const auto n_embd_head_k = is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
         const auto n_embd_nope   = hparams.n_lora_kv > 0 ? n_embd_head_k - n_rot : 0;
 
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
