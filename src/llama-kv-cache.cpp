@@ -1606,7 +1606,7 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     }
 
     // Use padded head_dim for turbo types so the full padded data is returned
-    const uint32_t head_k = is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
+    const uint32_t head_k = hparams.is_mla() ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
     const uint32_t head_k_eff = (k_is_turbo && head_k % 128 != 0)
         ? ((head_k + 127) / 128) * 128 : head_k;
 
@@ -2424,7 +2424,7 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
         const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
 
         const auto n_rot         = hparams.n_rot(il);
-        const auto n_embd_head_k = is_mla ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
+        const auto n_embd_head_k = hparams.is_mla() ? hparams.n_embd_head_k_mla() : hparams.n_embd_head_k(il);
         const auto n_embd_nope   = hparams.n_lora_kv > 0 ? n_embd_head_k - n_rot : 0;
 
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
