@@ -422,23 +422,6 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
-        // For quantized types, pad K dim to next multiple of block size
-        // (ggml_row_size and nb[1] disagree when ne[0] % blck_size != 0)
-        {
-            const uint32_t blck = ggml_blck_size(layer_type_k);
-            if (blck > 1 && n_embd_k_gqa_eff % blck != 0) {
-                n_embd_k_gqa_eff = ((n_embd_k_gqa_eff + blck - 1) / blck) * blck;
-                if (il == 0) {
-                    LLAMA_LOG_INFO("%s: quantized K padding: %u -> %u (block=%u)\n",
-                                   __func__, n_embd_k_gqa, n_embd_k_gqa_eff, blck);
-                }
-            }
-        }
-
-        LLAMA_LOG_DEBUG("%s: layer %3d: K=[%u,%u,%u] V=[%u,%u,%u] has_k=%d has_v=%d n_embd_k_gqa=%u n_embd_v_gqa=%u\n",
-            __func__, il, n_embd_k_gqa_eff, kv_size, n_stream, n_embd_v_gqa_eff, kv_size, n_stream,
-            (int)has_k, (int)has_v, n_embd_k_gqa, n_embd_v_gqa);
-
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa_eff, kv_size, n_stream) : nullptr;
 
@@ -449,17 +432,7 @@ llama_kv_cache::llama_kv_cache(
         std::vector<ggml_tensor *> v_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
-            if (has_k) {
-                const size_t row_size = ggml_row_size(k->type, n_embd_k_gqa_eff);
-                const size_t view_data_size = row_size * kv_size;
-                LLAMA_LOG_DEBUG("%s: layer %3d: K view s=%u: [%u,%u] nb[1]=%zu row_size=%zu view_data=%zu off=%zu nbytes=%zu type=%d\n",
-                    __func__, il, s, n_embd_k_gqa_eff, kv_size, k->nb[1], row_size, view_data_size, s*k->nb[2], ggml_nbytes(k), (int)k->type);
-            }
             k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa_eff, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
-            if (has_v) {
-                LLAMA_LOG_DEBUG("%s: layer %3d: V view s=%u: [%u,%u] nb[1]=%zu nb[2]=%zu off=%zu nbytes=%zu\n",
-                    __func__, il, s, n_embd_v_gqa_eff, kv_size, v->nb[1], v->nb[2], s*v->nb[2], ggml_nbytes(v));
-            }
             v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa_eff, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
         }
 
@@ -1725,11 +1698,6 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
 
         // merge the buffer across all streams because the idxs are global
         k = ggml_reshape_2d(ctx, k, n_embd_gqa, kv_size*n_stream);
-    }
-
-    // Pad k_cur to match cache K dim if quantized padding was applied
-    if (k_cur->ne[0] < k->ne[0]) {
-        k_cur = ggml_pad(ctx, k_cur, k->ne[0] - k_cur->ne[0], 0, 0, 0);
     }
 
     // store the current K values into the cache
