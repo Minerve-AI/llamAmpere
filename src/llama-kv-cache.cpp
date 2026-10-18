@@ -1714,6 +1714,17 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     }
 
     // store the current K values into the cache
+    if (k->ne[0] != k_cur->ne[0]) {
+        LLAMA_LOG_ERROR("cpy_k: SHAPE MISMATCH il=%d:\n", il);
+        LLAMA_LOG_ERROR("  k (cache):   ne=[%ld,%ld,%ld] type=%s\n", k->ne[0], k->ne[1], k->ne[2], ggml_type_name(k->type));
+        LLAMA_LOG_ERROR("  k_cur (src): ne=[%ld,%ld,%ld] type=%s\n", k_cur->ne[0], k_cur->ne[1], k_cur->ne[2], ggml_type_name(k_cur->type));
+        LLAMA_LOG_ERROR("  n_embd_k_gqa_eff=%d, hparams.n_embd_k_gqa(il)=%d\n",
+                        (int)k->ne[0], (int)hparams.n_embd_k_gqa(il));
+        LLAMA_LOG_ERROR("  hparams.n_embd_head_k(il)=%d, hparams.n_embd_head_k_mla()=%d\n",
+                        (int)hparams.n_embd_head_k(il), (int)hparams.n_embd_head_k_mla());
+        LLAMA_LOG_ERROR("  hparams.n_head_kv(il)=%d, hparams.n_layer()=%d, il=%d\n",
+                        (int)hparams.n_head_kv(il), (int)hparams.n_layer(), il);
+    }
     ggml_tensor * result = ggml_set_rows(ctx, k, k_cur, k_idxs);
 
     // For turbo: store WHT group size in op_params so the CUDA kernel knows.
@@ -1767,6 +1778,15 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
         }
 
+        if (v->ne[0] != v_cur->ne[0]) {
+            LLAMA_LOG_ERROR("cpy_v: SHAPE MISMATCH il=%d:\n", il);
+            LLAMA_LOG_ERROR("  v (cache):   ne=[%ld,%ld,%ld] type=%s\n", v->ne[0], v->ne[1], v->ne[2], ggml_type_name(v->type));
+            LLAMA_LOG_ERROR("  v_cur (src): ne=[%ld,%ld,%ld] type=%s\n", v_cur->ne[0], v_cur->ne[1], v_cur->ne[2], ggml_type_name(v_cur->type));
+            LLAMA_LOG_ERROR("  hparams.n_embd_v_gqa(il)=%d, hparams.n_embd_head_v(il)=%d\n",
+                            (int)hparams.n_embd_v_gqa(il), (int)hparams.n_embd_head_v(il));
+            LLAMA_LOG_ERROR("  hparams.n_head_kv(il)=%d, hparams.n_layer()=%d, il=%d\n",
+                            (int)hparams.n_head_kv(il), (int)hparams.n_layer(), il);
+        }
         ggml_tensor * result = ggml_set_rows(ctx, v, v_cur, v_idxs);
         // With zero-padding, all groups are always full 128-element WHT groups
         if (v_is_turbo) {
