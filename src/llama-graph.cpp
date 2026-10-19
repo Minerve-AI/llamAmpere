@@ -2858,6 +2858,55 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
+    // MLA attention path: K and Q have different head dimensions
+    // Q: [rank + n_rot, n_tokens, n_head, n_batch]
+    // K: [rank + n_rot*n_kv_base, n_tokens, 1, n_batch]  (packed MQA)
+    // V: [rank, n_tokens, 1, n_batch]
+    // Score = K_latent @ Q_nope + K_rope @ Q_rope
+    if (v_mla) {
+        const int64_t n_rot = hparams.mla_qk_rope_head_dim;
+        const int64_t rank  = q->ne[0] - n_rot;
+        const int64_t n_kv_base = 4;
+
+        // Split Q: [rank + n_rot, n_tokens, n_head, n_batch]
+        ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, q->ne[1], q->ne[2], q->ne[3],
+            q->nb[0], q->nb[1], q->nb[2], 0);
+        ggml_tensor * Q_rope = ggml_view_4d(ctx0, q, n_rot, q->ne[1], q->ne[2], q->ne[3],
+            q->nb[0], q->nb[1], q->nb[2], (size_t)rank * q->nb[0]);
+
+        // Split K: [rank + n_rot*n_kv_base, n_tokens, 1, n_batch]
+        ggml_tensor * K_latent = ggml_view_4d(ctx0, k, rank, k->ne[1], k->ne[2], k->ne[3],
+            k->nb[0], k->nb[1], k->nb[2], 0);
+        ggml_tensor * K_rope_raw = ggml_view_4d(ctx0, k, n_rot * n_kv_base, k->ne[1], k->ne[2], k->ne[3],
+            k->nb[0], k->nb[1], k->nb[2], (size_t)rank * k->nb[0]);
+        // Reshape K_rope: [n_rot*n_kv_base, n_tokens, 1, n_batch] → [n_rot, n_tokens, n_kv_base, n_batch]
+        ggml_tensor * K_rope = ggml_reshape_4d(ctx0, K_rope_raw, n_rot, k->ne[1], n_kv_base, k->ne[3]);
+
+        // Attention scores: kq = K_latent @ Q_nope + K_rope @ Q_rope
+        ggml_tensor * kq_nope = ggml_mul_mat(ctx0, K_latent, Q_nope);
+        ggml_tensor * kq_rope = ggml_mul_mat(ctx0, K_rope, Q_rope);
+        ggml_tensor * kq = ggml_add(ctx0, kq_nope, kq_rope);
+        cb(kq, "kq_mla", il);
+
+        // Softmax with mask
+        ggml_prec_set_acc(kq, GGML_PREC_F32);
+        kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, 0.0f);
+        cb(kq, "kq_softmax_mla", il);
+
+        // Attention output: attn = V @ kq → [rank, n_tokens, n_head, n_batch]
+        ggml_tensor * attn = ggml_mul_mat(ctx0, v, kq);
+        cb(attn, "attn_mla", il);
+
+        // V up-projection: out = v_mla @ attn
+        // v_mla: [rank, head_dim, n_head]
+        // attn:  [rank, n_tokens, n_head, n_batch]
+        attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
+        attn = ggml_mul_mat(ctx0, v_mla, attn);
+        cb(attn, "attn_vmla", il);
+        attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
+
+        cur = attn;
+    } else {
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
@@ -2992,6 +3041,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
         }
     }
+    } // end else (non-MLA)
 
     // TurboQuant: graph-side inverse WHT on attention output (undoes V rotation)
 
