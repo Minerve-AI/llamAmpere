@@ -157,8 +157,20 @@ uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
     const uint32_t n_head_kv = this->n_head_kv(il);
     // MTP layers (il >= n_layer) use standard GQA, not MLA
     const bool use_mla = is_mla() && il < n_layer();
-    const uint32_t head_k = use_mla ? n_embd_head_k_mla() : n_embd_head_k(il);
-
+    
+    uint32_t head_k;
+    if (use_mla) {
+        // Per-layer MLA: K_packed dim = rank[i] + rope_dim * n_kv_base
+        // rank varies per layer (e.g. 256, 768, 1792 for Qwen3.8-27B-MLA)
+        const uint32_t rank = mla_kv_lora_rank_arr[il];
+        const uint32_t rope_dim = mla_qk_rope_head_dim > 0 ? mla_qk_rope_head_dim : n_rot();
+        // n_kv_base = original KV heads before MQA compression (4 for Qwen35MLA)
+        const uint32_t n_kv_base = 4;
+        head_k = rank + rope_dim * n_kv_base;
+    } else {
+        head_k = n_embd_head_k(il);
+    }
+    
     return head_k * n_head_kv;
 }
 
