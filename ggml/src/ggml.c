@@ -5658,6 +5658,13 @@ struct ggml_tensor * ggml_flash_attn_ext(
         float                 scale,
         float                 max_bias,
         float                 logit_softcap) {
+    if (!ggml_can_mul_mat(k, q)) {
+        GGML_LOG_ERROR("ggml_flash_attn_ext: CAN MUL MAT FAILED:\n");
+        GGML_LOG_ERROR("  k: name='%s' ne=[%ld,%ld,%ld,%ld] type=%s\n", k->name, k->ne[0], k->ne[1], k->ne[2], k->ne[3], ggml_type_name(k->type));
+        GGML_LOG_ERROR("  q: name='%s' ne=[%ld,%ld,%ld,%ld] type=%s\n", q->name, q->ne[0], q->ne[1], q->ne[2], q->ne[3], ggml_type_name(q->type));
+        GGML_LOG_ERROR("  v: name='%s' ne=[%ld,%ld,%ld,%ld] type=%s\n", v->name, v->ne[0], v->ne[1], v->ne[2], v->ne[3], ggml_type_name(v->type));
+        GGML_LOG_ERROR("  k->ne[0]=%ld vs q->ne[0]=%ld (MISMATCH)\n", k->ne[0], q->ne[0]);
+    }
     GGML_ASSERT(ggml_can_mul_mat(k, q));
     // TODO: check if vT can be multiplied by (k*qT)
 

@@ -2833,6 +2833,19 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
 
+    // DEBUG: log tensor shapes for MLA diagnosis
+    if (v_mla) {
+        LLAMA_LOG_ERROR("build_attn_mha [MLA] il=%d:\n", il);
+        LLAMA_LOG_ERROR("  Q: ne=[%ld,%ld,%ld,%ld] type=%s\n", q->ne[0], q->ne[1], q->ne[2], q->ne[3], ggml_type_name(q->type));
+        LLAMA_LOG_ERROR("  K: ne=[%ld,%ld,%ld,%ld] type=%s\n", k->ne[0], k->ne[1], k->ne[2], k->ne[3], ggml_type_name(k->type));
+        LLAMA_LOG_ERROR("  V: ne=[%ld,%ld,%ld,%ld] type=%s\n", v->ne[0], v->ne[1], v->ne[2], v->ne[3], ggml_type_name(v->type));
+        LLAMA_LOG_ERROR("  v_mla: ne=[%ld,%ld,%ld,%ld] type=%s\n", v_mla->ne[0], v_mla->ne[1], v_mla->ne[2], v_mla->ne[3], ggml_type_name(v_mla->type));
+        LLAMA_LOG_ERROR("  n_rot=%d, rank=%d, n_kv_base=4\n",
+                        (int)hparams.mla_qk_rope_head_dim,
+                        (int)(q->ne[0] - hparams.mla_qk_rope_head_dim));
+        LLAMA_LOG_ERROR("  flash_attn=%d, kq_b=%s\n", (int)cparams.flash_attn, kq_b ? "yes" : "no");
+    }
+
     q = ggml_view_4d(ctx0, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream, q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
 
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
