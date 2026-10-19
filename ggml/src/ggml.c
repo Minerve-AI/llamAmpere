@@ -4157,17 +4157,6 @@ struct ggml_tensor * ggml_set_rows(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b,
         struct ggml_tensor  * c) {
-    if (a->ne[0] != b->ne[0]) {
-        GGML_LOG_ERROR("ggml_set_rows: ASSERT a->ne[0]==b->ne[0] FAILED:\n");
-        GGML_LOG_ERROR("  a: name='%s' type=%s ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
-                       a->name, ggml_type_name(a->type), a->ne[0], a->ne[1], a->ne[2], a->ne[3],
-                       a->nb[0], a->nb[1], a->nb[2], a->nb[3]);
-        GGML_LOG_ERROR("  b: name='%s' type=%s ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
-                       b->name, ggml_type_name(b->type), b->ne[0], b->ne[1], b->ne[2], b->ne[3],
-                       b->nb[0], b->nb[1], b->nb[2], b->nb[3]);
-        GGML_LOG_ERROR("  c: name='%s' type=%s ne=[%ld,%ld,%ld,%ld]\n",
-                       c->name, ggml_type_name(c->type), c->ne[0], c->ne[1], c->ne[2], c->ne[3]);
-    }
     GGML_ASSERT(a->ne[0] == b->ne[0]);
     GGML_ASSERT(a->ne[2] == b->ne[2]);
     GGML_ASSERT(a->ne[3] == b->ne[3]);
