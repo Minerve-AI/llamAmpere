@@ -2859,49 +2859,102 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     ggml_tensor * cur;
 
     // MLA attention path: K and Q have different head dimensions
-    // Q: [rank + n_rot, n_tokens, n_head, n_batch]
-    // K: [rank + n_rot*n_kv_base, n_tokens, 1, n_batch]  (packed MQA)
-    // V: [rank, n_tokens, 1, n_batch]
-    // Score = K_latent @ Q_nope + K_rope @ Q_rope
+    // After permute: Q: [rank+n_rot, n_tokens, n_head, n_batch]
+    //                 K: [rank+n_rot*n_kv_base, n_tokens, 1, n_batch]
+    //                 V: [rank, n_tokens, 1, n_batch]
     if (v_mla) {
         const int64_t n_rot = hparams.mla_qk_rope_head_dim;
         const int64_t rank  = q->ne[0] - n_rot;
         const int64_t n_kv_base = 4;
+        const int64_t n_tokens_q = q->ne[1];
+        const int64_t n_tokens_kv = k->ne[1];
+        const int64_t n_head = q->ne[2];
+        const int64_t n_batch = q->ne[3];
 
-        // Split Q: [rank + n_rot, n_tokens, n_head, n_batch]
-        ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, q->ne[1], q->ne[2], q->ne[3],
+        LLAMA_LOG_ERROR("build_attn_mha [MLA] il=%d: Q=[%lld,%lld,%lld,%lld] K=[%lld,%lld,%lld,%lld] V=[%lld,%lld,%lld,%lld]\n",
+            il, q->ne[0],q->ne[1],q->ne[2],q->ne[3], k->ne[0],k->ne[1],k->ne[2],k->ne[3], v->ne[0],v->ne[1],v->ne[2],v->ne[3]);
+        LLAMA_LOG_ERROR("  n_rot=%lld rank=%lld n_kv_base=%lld n_head=%lld n_tokens_q=%lld n_tokens_kv=%lld\n",
+            n_rot, rank, n_kv_base, n_head, n_tokens_q, n_tokens_kv);
+
+        // Split Q: [rank+n_rot, n_tokens_q, n_head, n_batch]
+        ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, n_tokens_q, n_head, n_batch,
             q->nb[0], q->nb[1], q->nb[2], 0);
-        ggml_tensor * Q_rope = ggml_view_4d(ctx0, q, n_rot, q->ne[1], q->ne[2], q->ne[3],
+        ggml_tensor * Q_rope = ggml_view_4d(ctx0, q, n_rot, n_tokens_q, n_head, n_batch,
             q->nb[0], q->nb[1], q->nb[2], (size_t)rank * q->nb[0]);
 
-        // Split K: [rank + n_rot*n_kv_base, n_tokens, 1, n_batch]
-        ggml_tensor * K_latent = ggml_view_4d(ctx0, k, rank, k->ne[1], k->ne[2], k->ne[3],
+        // Split K: [rank+n_rot*n_kv_base, n_tokens_kv, 1, n_batch]
+        ggml_tensor * K_latent_raw = ggml_view_4d(ctx0, k, rank, n_tokens_kv, 1, n_batch,
             k->nb[0], k->nb[1], k->nb[2], 0);
-        ggml_tensor * K_rope_raw = ggml_view_4d(ctx0, k, n_rot * n_kv_base, k->ne[1], k->ne[2], k->ne[3],
+        ggml_tensor * K_rope_raw = ggml_view_4d(ctx0, k, n_rot * n_kv_base, n_tokens_kv, 1, n_batch,
             k->nb[0], k->nb[1], k->nb[2], (size_t)rank * k->nb[0]);
-        // Reshape K_rope: [n_rot*n_kv_base, n_tokens, 1, n_batch] → [n_rot, n_tokens, n_kv_base, n_batch]
-        ggml_tensor * K_rope = ggml_reshape_4d(ctx0, K_rope_raw, n_rot, k->ne[1], n_kv_base, k->ne[3]);
 
-        // Attention scores: kq = K_latent @ Q_nope + K_rope @ Q_rope
+        // Make contiguous (required by ggml_mul_mat)
+        ggml_tensor * K_latent = ggml_cont(ctx0, K_latent_raw);
+        LLAMA_LOG_ERROR("  K_latent cont: [%lld,%lld,%lld,%lld] cont=%d\n",
+            K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3], ggml_is_contiguous(K_latent));
+
+        // Part 1: kq_nope = K_latent @ Q_nope
+        // K_latent: [rank, n_tokens_kv, 1, n_batch]
+        // Q_nope:   [rank, n_tokens_q, n_head, n_batch]
+        // result:   [n_tokens_kv, n_tokens_q, n_head, n_batch]
         ggml_tensor * kq_nope = ggml_mul_mat(ctx0, K_latent, Q_nope);
-        ggml_tensor * kq_rope = ggml_mul_mat(ctx0, K_rope, Q_rope);
+        LLAMA_LOG_ERROR("  kq_nope: [%lld,%lld,%lld,%lld]\n", kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3]);
+        cb(kq_nope, "kq_nope_mla", il);
+
+        // Part 2: kq_rope = sum over kv_base of (K_rope_i @ Q_rope)
+        // K_rope_raw: [n_rot*n_kv_base, n_tokens_kv, 1, n_batch]
+        // Reshape to: [n_rot, n_kv_base, n_tokens_kv, n_batch]
+        ggml_tensor * K_rope = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw), n_rot, n_kv_base, n_tokens_kv, n_batch);
+        LLAMA_LOG_ERROR("  K_rope: [%lld,%lld,%lld,%lld]\n", K_rope->ne[0],K_rope->ne[1],K_rope->ne[2],K_rope->ne[3]);
+
+        ggml_tensor * kq_rope = nullptr;
+        for (int64_t i = 0; i < n_kv_base; i++) {
+            // Extract i-th kv_base slice: [n_rot, n_tokens_kv, 1, n_batch]
+            ggml_tensor * K_rope_i = ggml_view_4d(ctx0, K_rope, n_rot, n_tokens_kv, 1, n_batch,
+                K_rope->nb[0], K_rope->nb[2], K_rope->nb[3], i * K_rope->nb[1]);
+            ggml_tensor * K_rope_i_c = ggml_cont(ctx0, K_rope_i);
+            // K_rope_i: [n_rot, n_tokens_kv, 1, n_batch]
+            // Q_rope:   [n_rot, n_tokens_q, n_head, n_batch]
+            // result:   [n_tokens_kv, n_tokens_q, n_head, n_batch]
+            ggml_tensor * kq_rope_i = ggml_mul_mat(ctx0, K_rope_i_c, Q_rope);
+            if (kq_rope == nullptr) {
+                kq_rope = kq_rope_i;
+            } else {
+                kq_rope = ggml_add(ctx0, kq_rope, kq_rope_i);
+            }
+        }
+        LLAMA_LOG_ERROR("  kq_rope: [%lld,%lld,%lld,%lld]\n", kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3]);
+        cb(kq_rope, "kq_rope_mla", il);
+
+        // Total attention scores
         ggml_tensor * kq = ggml_add(ctx0, kq_nope, kq_rope);
+        LLAMA_LOG_ERROR("  kq total: [%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
         cb(kq, "kq_mla", il);
 
         // Softmax with mask
         ggml_prec_set_acc(kq, GGML_PREC_F32);
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, 0.0f);
+        LLAMA_LOG_ERROR("  kq softmax: [%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
         cb(kq, "kq_softmax_mla", il);
 
-        // Attention output: attn = V @ kq → [rank, n_tokens, n_head, n_batch]
-        ggml_tensor * attn = ggml_mul_mat(ctx0, v, kq);
+        // Attention output: attn = V @ kq
+        // V:  [rank, n_tokens_kv, 1, n_batch]
+        // kq: [n_tokens_kv, n_tokens_q, n_head, n_batch]
+        // result: [rank, n_tokens_q, n_head, n_batch]
+        ggml_tensor * v_c = ggml_cont(ctx0, v);
+        ggml_tensor * attn = ggml_mul_mat(ctx0, v_c, kq);
+        LLAMA_LOG_ERROR("  attn: [%lld,%lld,%lld,%lld]\n", attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
         cb(attn, "attn_mla", il);
 
         // V up-projection: out = v_mla @ attn
         // v_mla: [rank, head_dim, n_head]
-        // attn:  [rank, n_tokens, n_head, n_batch]
+        // attn:  [rank, n_tokens_q, n_head, n_batch]
+        // permute attn: [rank, n_head, n_tokens_q, n_batch]
+        // v_mla @ attn: [head_dim, n_head, n_tokens_q, n_batch]
+        // permute back: [head_dim, n_tokens_q, n_head, n_batch]
         attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
         attn = ggml_mul_mat(ctx0, v_mla, attn);
+        LLAMA_LOG_ERROR("  attn_vmla: [%lld,%lld,%lld,%lld]\n", attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
         cb(attn, "attn_vmla", il);
         attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
 
