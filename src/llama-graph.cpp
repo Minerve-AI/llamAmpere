@@ -2938,27 +2938,36 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(kq, "kq_softmax_mla", il);
 
         // Attention output: attn = V @ kq
-        // V:  [rank, n_tokens_kv, 1, n_batch]
+        // V:  [rank, n_tokens_kv, 1, n_batch] → transpose → [n_tokens_kv, rank, 1, n_batch]
         // kq: [n_tokens_kv, n_tokens_q, n_head, n_batch]
         // result: [rank, n_tokens_q, n_head, n_batch]
-        ggml_tensor * v_c = ggml_cont(ctx0, v);
-        ggml_tensor * attn = ggml_mul_mat(ctx0, v_c, kq);
+        ggml_tensor * v_attn = v;
+        if (!v_trans) {
+            v_attn = ggml_transpose(ctx0, v_attn);
+            LLAMA_LOG_ERROR("  v transposed: [%lld,%lld,%lld,%lld]\n", v_attn->ne[0],v_attn->ne[1],v_attn->ne[2],v_attn->ne[3]);
+        }
+        v_attn = ggml_cont(ctx0, v_attn);
+        LLAMA_LOG_ERROR("  v_attn cont: [%lld,%lld,%lld,%lld] cont=%d\n", v_attn->ne[0],v_attn->ne[1],v_attn->ne[2],v_attn->ne[3], ggml_is_contiguous(v_attn));
+        LLAMA_LOG_ERROR("  kq for v@kq: [%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
+        ggml_tensor * attn = ggml_mul_mat(ctx0, v_attn, kq);
         LLAMA_LOG_ERROR("  attn: [%lld,%lld,%lld,%lld]\n", attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
         cb(attn, "attn_mla", il);
 
         // V up-projection: out = v_mla @ attn
-        // v_mla: [rank, head_dim, n_head]
-        // attn:  [rank, n_tokens_q, n_head, n_batch]
-        // permute attn: [rank, n_head, n_tokens_q, n_batch]
-        // v_mla @ attn: [head_dim, n_head, n_tokens_q, n_batch]
-        // permute back: [head_dim, n_tokens_q, n_head, n_batch]
-        attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
+        // v_mla: [head_dim, rank, n_head, n_batch] = [256, 256, 24, 1]
+        // attn:  [rank, n_tokens_q, n_head, n_batch] = [256, 2, 24, 1]
+        // batch dims [24,1] and [24,1] broadcast correctly
+        // result: [head_dim, n_tokens_q, n_head, n_batch] = [256, 2, 24, 1]
+        LLAMA_LOG_ERROR("  v_mla: [%lld,%lld,%lld,%lld] attn before vmla: [%lld,%lld,%lld,%lld]\n",
+            v_mla->ne[0],v_mla->ne[1],v_mla->ne[2],v_mla->ne[3], attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
         attn = ggml_mul_mat(ctx0, v_mla, attn);
         LLAMA_LOG_ERROR("  attn_vmla: [%lld,%lld,%lld,%lld]\n", attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
         cb(attn, "attn_vmla", il);
-        attn = ggml_permute(ctx0, attn, 0, 2, 1, 3);
 
-        cur = attn;
+        // Final reshape: [head_dim, n_tokens_q, n_head, n_batch] → [head_dim*n_head, n_tokens_q*n_batch]
+        cur = ggml_permute(ctx0, attn, 0, 2, 1, 3);
+        cur = ggml_cont_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+        LLAMA_LOG_ERROR("  cur final: [%lld,%lld,%lld,%lld]\n", cur->ne[0],cur->ne[1],cur->ne[2],cur->ne[3]);
     } else {
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
     if (use_flash_attn) {
