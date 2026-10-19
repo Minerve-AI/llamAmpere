@@ -1720,7 +1720,7 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     if (k_cur->ne[0] < k->ne[0]) {
         // Write only the first k_cur->ne[0] elements per row
         k_dst = ggml_view_3d(ctx, k, k_cur->ne[0], k->ne[1], k->ne[2],
-                             k->nb[0], k->nb[1], k->nb[2]);
+                             k->nb[1], k->nb[2], 0);
     }
     ggml_tensor * result = ggml_set_rows(ctx, k_dst, k_cur, k_idxs);
 
@@ -1779,7 +1779,7 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
         ggml_tensor * v_dst = v;
         if (v_cur->ne[0] < v->ne[0]) {
             v_dst = ggml_view_3d(ctx, v, v_cur->ne[0], v->ne[1], v->ne[2],
-                                 v->nb[0], v->nb[1], v->nb[2]);
+                                 v->nb[1], v->nb[2], 0);
         }
         ggml_tensor * result = ggml_set_rows(ctx, v_dst, v_cur, v_idxs);
         // With zero-padding, all groups are always full 128-element WHT groups
