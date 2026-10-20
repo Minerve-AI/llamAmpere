@@ -2947,9 +2947,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(kq_rope, "kq_rope_mla", il);
 
         // Total attention scores
-        LLAMA_LOG_ERROR("  BEFORE kq_add: kq_nope=[%lld,%lld,%lld,%lld] kq_rope=[%lld,%lld,%lld,%lld]\n",
-            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3],
-            kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3]);
+        LLAMA_LOG_ERROR("  BEFORE kq_add: kq_nope=[%lld,%lld,%lld,%lld] cont=%d kq_rope=[%lld,%lld,%lld,%lld] cont=%d\n",
+            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3],ggml_is_contiguous(kq_nope),
+            kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3],ggml_is_contiguous(kq_rope));
+        kq_nope = ggml_cont(ctx0, kq_nope);
+        kq_rope = ggml_cont(ctx0, kq_rope);
         ggml_tensor * kq = ggml_add(ctx0, kq_nope, kq_rope);
         LLAMA_LOG_ERROR("  AFTER kq_add: kq=[%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
         cb(kq, "kq_mla", il);
