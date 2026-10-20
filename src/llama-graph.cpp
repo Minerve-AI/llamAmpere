@@ -2942,14 +2942,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(kq_rope, "kq_rope_mla", il);
 
         // Total attention scores
+        LLAMA_LOG_ERROR("  BEFORE kq_add: kq_nope=[%lld,%lld,%lld,%lld] kq_rope=[%lld,%lld,%lld,%lld]\n",
+            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3],
+            kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3]);
         ggml_tensor * kq = ggml_add(ctx0, kq_nope, kq_rope);
-        LLAMA_LOG_ERROR("  kq total: [%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
+        LLAMA_LOG_ERROR("  AFTER kq_add: kq=[%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
         cb(kq, "kq_mla", il);
 
         // Softmax with mask
+        LLAMA_LOG_ERROR("  BEFORE softmax: kq=[%lld,%lld,%lld,%lld] mask=[%lld,%lld,%lld,%lld] scale=%f\n",
+            kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3],
+            kq_mask ? kq_mask->ne[0]:0, kq_mask ? kq_mask->ne[1]:0, kq_mask ? kq_mask->ne[2]:0, kq_mask ? kq_mask->ne[3]:0,
+            kq_scale);
         ggml_prec_set_acc(kq, GGML_PREC_F32);
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, 0.0f);
-        LLAMA_LOG_ERROR("  kq softmax: [%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
+        LLAMA_LOG_ERROR("  AFTER softmax: kq=[%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
         cb(kq, "kq_softmax_mla", il);
 
         // Attention output: attn = V @ kq
