@@ -457,6 +457,7 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         //
         // 8. Apply gate (sigmoid)
         //
+        gate = ggml_cont_2d(ctx0, gate, head_dim * n_head, n_tokens);
         ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
         cb(gate_sigmoid, "gate_sigmoid", il);
 
