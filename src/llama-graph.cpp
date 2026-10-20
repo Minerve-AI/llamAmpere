@@ -2907,12 +2907,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         // K_latent:    [rank, n_tokens_kv, 1, 1]
         // Q_nope_flat: [rank, n_qh, 1, 1]
         // result:      [n_tokens_kv, n_qh, 1, 1]
+        LLAMA_LOG_ERROR("  STEP1: before ggml_mul_mat(K_latent, Q_nope_flat)\n");
         ggml_tensor * kq_nope_flat = ggml_mul_mat(ctx0, K_latent, Q_nope_flat);
-        LLAMA_LOG_ERROR("  kq_nope_flat: [%lld,%lld,%lld,%lld]\n", kq_nope_flat->ne[0],kq_nope_flat->ne[1],kq_nope_flat->ne[2],kq_nope_flat->ne[3]);
-        // Reshape back: [n_tokens_kv, n_qh, 1, 1] → [n_tokens_kv, n_tokens_q, n_head, 1]
+        LLAMA_LOG_ERROR("  STEP2: after ggml_mul_mat, kq_nope_flat=[%lld,%lld,%lld,%lld] cont=%d\n",
+            kq_nope_flat->ne[0],kq_nope_flat->ne[1],kq_nope_flat->ne[2],kq_nope_flat->ne[3], ggml_is_contiguous(kq_nope_flat));
+        LLAMA_LOG_ERROR("  STEP3: before ggml_reshape_4d\n");
         ggml_tensor * kq_nope = ggml_reshape_4d(ctx0, kq_nope_flat, n_tokens_kv, n_tokens_q, n_head, 1);
-        LLAMA_LOG_ERROR("  kq_nope: [%lld,%lld,%lld,%lld]\n", kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3]);
+        LLAMA_LOG_ERROR("  STEP4: after ggml_reshape_4d, kq_nope=[%lld,%lld,%lld,%lld]\n",
+            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3]);
+        LLAMA_LOG_ERROR("  STEP5: before cb()\n");
         cb(kq_nope, "kq_nope_mla", il);
+        LLAMA_LOG_ERROR("  STEP6: after cb()\n");
 
         // Part 2: kq_rope = sum over kv_base of (K_rope_i @ Q_rope_flat)
         ggml_tensor * K_rope = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw), n_rot, n_kv_base, n_tokens_kv, n_batch);
