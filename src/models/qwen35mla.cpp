@@ -449,20 +449,26 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         // Reshape wv_b: [rank, head_dim*n_head] → [rank, head_dim, n_head] for v_mla
         ggml_tensor * wv_b_3d = ggml_reshape_3d(ctx0, layer.wv_b, rank, head_dim, n_head);
 
-        ggml_tensor * attn_out = build_attn(inp,
-                    layer.wo, nullptr, layer.wo_s,
+        ggml_tensor * attn_raw = build_attn(inp,
+                    nullptr, nullptr, nullptr,
                     Q_full, K_packed, V_latent, nullptr, nullptr, wv_b_3d, kq_scale, il);
-        cb(attn_out, "attn_out", il);
+        cb(attn_raw, "attn_raw", il);
 
         //
-        // 8. Apply gate (sigmoid)
+        // 8. Apply gate (sigmoid) — must be before wo projection
         //
         gate = ggml_cont_2d(ctx0, gate, head_dim * n_head, n_tokens);
         ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
         cb(gate_sigmoid, "gate_sigmoid", il);
 
-        ggml_tensor * result = ggml_mul(ctx0, attn_out, gate_sigmoid);
-        cb(result, "attn_gated", il);
+        ggml_tensor * attn_gated = ggml_mul(ctx0, attn_raw, gate_sigmoid);
+        cb(attn_gated, "attn_gated", il);
+
+        //
+        // 9. Output projection
+        //
+        ggml_tensor * result = build_lora_mm(layer.wo, attn_gated, layer.wo_s);
+        cb(result, "attn_output", il);
 
         return result;
     }
