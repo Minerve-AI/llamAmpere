@@ -385,7 +385,9 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         // Reshape wk_b: [r, N*P] → [r, P, N]  (W_reshaped[d,p,h] = W[d, h*P+p])
         ggml_tensor * wk_b_3d = ggml_reshape_3d(ctx0, layer.wk_b, rank, qk_nope, n_head);
         // Permute: [r, P, N] → [P, r, N]  (A[p,d,h] = W_UK[h][d,p])
-        ggml_tensor * wk_b_t = ggml_permute(ctx0, wk_b_3d, 1, 0, 2, 3);
+        // ggml_cont required: permute swaps nb[0]/nb[1] making the tensor "transposed"
+        // which ggml_mul_mat rejects via GGML_ASSERT(!ggml_is_transposed(a))
+        ggml_tensor * wk_b_t = ggml_cont(ctx0, ggml_permute(ctx0, wk_b_3d, 1, 0, 2, 3));
         // Permute q_nope: [P, N, n_tokens] → [P, n_tokens, N]  (B[p,t,h] = q_nope[p,h,t])
         ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
         // Batched matmul: result[d,t,h] = sum_p A[p,d,h]*B[p,t,h] → [r, n_tokens, N]
