@@ -453,22 +453,46 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
                     nullptr, nullptr, nullptr,
                     Q_full, K_packed, V_latent, nullptr, nullptr, wv_b_3d, kq_scale, il);
         cb(attn_raw, "attn_raw", il);
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d attn_raw: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s op=%d cont=%d transposed=%d\n",
+            il, attn_raw->ne[0],attn_raw->ne[1],attn_raw->ne[2],attn_raw->ne[3],
+            attn_raw->nb[0],attn_raw->nb[1],attn_raw->nb[2],attn_raw->nb[3],
+            ggml_type_name(attn_raw->type), (int)attn_raw->op,
+            (int)ggml_is_contiguous(attn_raw), (int)ggml_is_transposed(attn_raw));
 
         //
         // 8. Apply gate (sigmoid) — must be before wo projection
         //
         gate = ggml_cont_2d(ctx0, gate, head_dim * n_head, n_tokens);
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d gate(cont_2d): ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s cont=%d transposed=%d\n",
+            il, gate->ne[0],gate->ne[1],gate->ne[2],gate->ne[3],
+            gate->nb[0],gate->nb[1],gate->nb[2],gate->nb[3],
+            ggml_type_name(gate->type), (int)ggml_is_contiguous(gate), (int)ggml_is_transposed(gate));
+
         ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
         cb(gate_sigmoid, "gate_sigmoid", il);
 
         ggml_tensor * attn_gated = ggml_mul(ctx0, attn_raw, gate_sigmoid);
         cb(attn_gated, "attn_gated", il);
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d attn_gated: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s op=%d cont=%d transposed=%d\n",
+            il, attn_gated->ne[0],attn_gated->ne[1],attn_gated->ne[2],attn_gated->ne[3],
+            attn_gated->nb[0],attn_gated->nb[1],attn_gated->nb[2],attn_gated->nb[3],
+            ggml_type_name(attn_gated->type), (int)attn_gated->op,
+            (int)ggml_is_contiguous(attn_gated), (int)ggml_is_transposed(attn_gated));
 
         //
         // 9. Output projection
         //
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d layer.wo: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s op=%d cont=%d transposed=%d\n",
+            il, layer.wo->ne[0],layer.wo->ne[1],layer.wo->ne[2],layer.wo->ne[3],
+            layer.wo->nb[0],layer.wo->nb[1],layer.wo->nb[2],layer.wo->nb[3],
+            ggml_type_name(layer.wo->type), (int)layer.wo->op,
+            (int)ggml_is_contiguous(layer.wo), (int)ggml_is_transposed(layer.wo));
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d BEFORE build_lora_mm(wo, attn_gated)\n", il);
+
         ggml_tensor * result = build_lora_mm(layer.wo, attn_gated, layer.wo_s);
         cb(result, "attn_output", il);
+        LLAMA_LOG_ERROR("[MLA-DBG] il=%d AFTER build_lora_mm: result ne=[%lld,%lld,%lld,%lld]\n",
+            il, result->ne[0],result->ne[1],result->ne[2],result->ne[3]);
 
         return result;
     }

@@ -3206,8 +3206,12 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
+    LLAMA_LOG_ERROR("[MLA-DBG] build_attn il=%d: after build_attn_mha cur: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu] wo=%s\n",
+        il, cur->ne[0],cur->ne[1],cur->ne[2],cur->ne[3], cur->nb[0],cur->nb[1], wo ? "yes" : "null");
 
     if (wo) {
+        LLAMA_LOG_ERROR("[MLA-DBG] build_attn il=%d: BEFORE build_lora_mm(wo,cur) wo: ne=[%lld,%lld] nb=[%zu,%zu] transposed=%d\n",
+            il, wo->ne[0],wo->ne[1], wo->nb[0],wo->nb[1], (int)ggml_is_transposed(wo));
         cur = build_lora_mm(wo, cur, wo_s);
     }
 
