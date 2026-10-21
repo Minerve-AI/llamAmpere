@@ -328,6 +328,10 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         int                       il) {
     const auto & layer = model.layers[il];
 
+    LLAMA_LOG_ERROR("[MLA-DBG-LAYER] il=%d: wv_b=%s wk_b=%s wkv_a_mqa=%s wk_rope=%s\n",
+        il, layer.wv_b ? "OK" : "NULL", layer.wk_b ? "OK" : "NULL",
+        layer.wkv_a_mqa ? "OK" : "NULL", layer.wk_rope ? "OK" : "NULL");
+
     const int64_t rank      = hparams.mla_kv_lora_rank_arr[il];
     const int64_t head_dim  = hparams.n_embd_head_v();   // 256
     const int64_t n_head    = hparams.n_head();           // 24
