@@ -2955,7 +2955,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             }
 
             // --- Apply scale ---
-            s = ggml_mul(ctx0, s, ggml_new_f32(ctx0, kq_scale));
+            // Scale via GGML_API tensor (ggml_new_f32 is GGML_BACKEND_API, not in Windows DLL)
+            ggml_tensor * kq_scale_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+            *(float *)kq_scale_t->data = kq_scale;
+            ggml_set_input(kq_scale_t);
+            s = ggml_mul(ctx0, s, kq_scale_t);
 
             // --- Apply causal mask (if present) ---
             if (kq_mask) {
