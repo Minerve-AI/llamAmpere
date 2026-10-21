@@ -3498,6 +3498,11 @@ struct ggml_tensor * ggml_mul_mat(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b) {
     GGML_ASSERT(ggml_can_mul_mat(a, b));
+    if (ggml_is_transposed(a)) {
+        fprintf(stderr, "[GGML-MULMAT-TRANSPOSED] a: ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu] type=%d op=%d | b: ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu]\n",
+            a->ne[0],a->ne[1],a->ne[2],a->ne[3], a->nb[0],a->nb[1],a->nb[2],a->nb[3], (int)a->type, (int)a->op,
+            b->ne[0],b->ne[1],b->ne[2],b->ne[3], b->nb[0],b->nb[1],b->nb[2],b->nb[3]);
+    }
     GGML_ASSERT(!ggml_is_transposed(a));
 
     const int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
