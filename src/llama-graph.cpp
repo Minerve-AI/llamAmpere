@@ -2907,88 +2907,107 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         LLAMA_LOG_ERROR("  K_latent: [%lld,%lld,%lld,%lld] cont=%d\n",
             K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3], ggml_is_contiguous(K_latent));
 
-        // Part 1: kq_nope = K_latent @ Q_nope_flat
-        // K_latent:    [rank, n_tokens_kv, 1, 1]
-        // Q_nope_flat: [rank, n_qh, 1, 1]
-        // result:      [n_tokens_kv, n_qh, 1, 1]
-        LLAMA_LOG_ERROR("  STEP1: before ggml_mul_mat(K_latent, Q_nope_flat)\n");
-        ggml_tensor * kq_nope_flat = ggml_mul_mat(ctx0, K_latent, Q_nope_flat);
-        LLAMA_LOG_ERROR("  STEP2: after ggml_mul_mat, kq_nope_flat=[%lld,%lld,%lld,%lld] cont=%d\n",
-            kq_nope_flat->ne[0],kq_nope_flat->ne[1],kq_nope_flat->ne[2],kq_nope_flat->ne[3], ggml_is_contiguous(kq_nope_flat));
-        LLAMA_LOG_ERROR("  STEP3: before ggml_reshape_4d\n");
-        ggml_tensor * kq_nope = ggml_reshape_4d(ctx0, kq_nope_flat, n_tokens_kv, n_tokens_q, n_head, 1);
-        LLAMA_LOG_ERROR("  STEP4: after ggml_reshape_4d, kq_nope=[%lld,%lld,%lld,%lld]\n",
-            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3]);
-        LLAMA_LOG_ERROR("  STEP5: before cb()\n");
-        cb(kq_nope, "kq_nope_mla", il);
-        LLAMA_LOG_ERROR("  STEP6: after cb()\n");
+        // === CHUNKED MLA ATTENTION (exp-accumulation, no full score matrix) ===
+        // Replaces the O(n_kv * n_qh) full-matrix approach with O(CHUNK * n_qh) tiles.
+        // Numerically safe: MLA scores after kq_scale are bounded (~[-10,10]) due to
+        // RMS-normed latents, so exp() won't overflow F32.
+        const int64_t MLA_CHUNK = 1024;
+        const int64_t n_chunks = (n_tokens_kv + MLA_CHUNK - 1) / MLA_CHUNK;
 
-        // Part 2: kq_rope = sum over kv_base of (K_rope_i @ Q_rope_flat)
-        ggml_tensor * K_rope = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw), n_rot, n_kv_base, n_tokens_kv, n_batch);
-        LLAMA_LOG_ERROR("  K_rope: [%lld,%lld,%lld,%lld]\n", K_rope->ne[0],K_rope->ne[1],K_rope->ne[2],K_rope->ne[3]);
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: n_kv=%lld n_qh=%lld chunks=%lld chunk_size=%lld\n",
+            il, n_tokens_kv, n_qh, n_chunks, MLA_CHUNK);
 
-        ggml_tensor * kq_rope = nullptr;
-        for (int64_t i = 0; i < n_kv_base; i++) {
-            // Extract i-th kv_base slice: [n_rot, n_tokens_kv, 1, n_batch]
-            ggml_tensor * K_rope_i = ggml_view_4d(ctx0, K_rope, n_rot, n_tokens_kv, 1, n_batch,
-                K_rope->nb[0], K_rope->nb[2], K_rope->nb[3], i * K_rope->nb[1]);
-            ggml_tensor * K_rope_i_c = ggml_cont(ctx0, K_rope_i);
-            LLAMA_LOG_ERROR("  K_rope_%lld: [%lld,%lld,%lld,%lld] cont=%d\n",
-                i, K_rope_i_c->ne[0],K_rope_i_c->ne[1],K_rope_i_c->ne[2],K_rope_i_c->ne[3], ggml_is_contiguous(K_rope_i_c));
-            // K_rope_i:    [n_rot, n_tokens_kv, 1, 1]
-            // Q_rope_flat: [n_rot, n_qh, 1, 1]
-            // result:      [n_tokens_kv, n_qh, 1, 1]
-            ggml_tensor * kq_rope_i_flat = ggml_mul_mat(ctx0, K_rope_i_c, Q_rope_flat);
-            // Reshape: [n_tokens_kv, n_qh, 1, 1] → [n_tokens_kv, n_tokens_q, n_head, 1]
-            ggml_tensor * kq_rope_i = ggml_reshape_4d(ctx0, kq_rope_i_flat, n_tokens_kv, n_tokens_q, n_head, 1);
-            if (kq_rope == nullptr) {
-                kq_rope = kq_rope_i;
+        // Pre-compute V transposed: [n_tokens_kv, rank, 1, n_batch]
+        ggml_tensor * V_t = v;
+        if (!v_trans) {
+            V_t = ggml_transpose(ctx0, V_t);
+        }
+        V_t = ggml_cont(ctx0, V_t);
+
+        // K_rope as 4D: [n_rot, n_kv_base, n_tokens_kv, n_batch]
+        ggml_tensor * K_rope_4d = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw),
+            n_rot, n_kv_base, n_tokens_kv, n_batch);
+
+        // Accumulators (lazy init on first chunk)
+        ggml_tensor * acc   = nullptr;  // [rank, n_qh, 1, 1] F32
+        ggml_tensor * l_sum = nullptr;  // [1, n_qh, 1, 1]  F32
+
+        for (int64_t c = 0; c < n_chunks; c++) {
+            const int64_t kv_start = c * MLA_CHUNK;
+            const int64_t chunk    = std::min(MLA_CHUNK, n_tokens_kv - kv_start);
+
+            // --- K_latent tile: [rank, chunk, 1, 1] ---
+            ggml_tensor * K_t = ggml_cont(ctx0, ggml_view_4d(ctx0, K_latent,
+                rank, chunk, 1, 1,
+                K_latent->nb[0], K_latent->nb[1], K_latent->nb[2],
+                (size_t)kv_start * K_latent->nb[1]));
+
+            // --- Scores: nope part [chunk, n_qh, 1, 1] ---
+            ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_flat);
+
+            // --- Add rope contributions (4 small matmuls) ---
+            for (int64_t i = 0; i < n_kv_base; i++) {
+                ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
+                    n_rot, chunk, 1, n_batch,
+                    K_rope_4d->nb[0], K_rope_4d->nb[2], K_rope_4d->nb[3],
+                    (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
+                s = ggml_add(ctx0, s, ggml_mul_mat(ctx0, Kr, Q_rope_flat));
+            }
+
+            // --- Apply scale ---
+            s = ggml_mul(ctx0, s, ggml_new_f32(ctx0, kq_scale));
+
+            // --- Apply causal mask (if present) ---
+            if (kq_mask) {
+                // kq_mask: [n_tokens_kv, n_tokens_q, n_head, n_batch] (or [..., 1, n_batch])
+                // Extract rows [kv_start, kv_start+chunk) and reshape to [chunk, n_qh, 1, 1]
+                ggml_tensor * mt = ggml_view_4d(ctx0, kq_mask,
+                    kq_mask->ne[1], chunk, kq_mask->ne[2], kq_mask->ne[3],
+                    kq_mask->nb[1], kq_mask->nb[0], kq_mask->nb[2],
+                    (size_t)kv_start * kq_mask->nb[0]);
+                mt = ggml_cont(ctx0, mt);
+                mt = ggml_reshape_4d(ctx0, mt, chunk, n_qh, 1, 1);
+                s = ggml_add(ctx0, s, ggml_cast(ctx0, mt, GGML_TYPE_F32));
+            }
+
+            // --- Cast to F32 for stable exp ---
+            s = ggml_cast(ctx0, s, GGML_TYPE_F32);
+            ggml_prec_set_acc(s, GGML_PREC_F32);
+
+            // --- exp(s): masked positions (-inf) → 0 ---
+            ggml_tensor * e = ggml_exp(ctx0, s);
+
+            // --- V tile: [chunk, rank, 1, n_batch] ---
+            ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_view_4d(ctx0, V_t,
+                chunk, rank, 1, n_batch,
+                V_t->nb[1], V_t->nb[0], V_t->nb[2],
+                (size_t)kv_start * V_t->nb[0]));
+
+            // --- acc += V_tile @ e  [rank, n_qh] ---
+            ggml_tensor * v_e = ggml_mul_mat(ctx0, V_t_tile, e);
+
+            if (acc == nullptr) {
+                acc   = v_e;
+                l_sum = ggml_sum_rows(ctx0, e);  // [1, n_qh, 1, 1]
             } else {
-                kq_rope = ggml_add(ctx0, kq_rope, kq_rope_i);
+                acc   = ggml_add(ctx0, acc, v_e);
+                l_sum = ggml_add(ctx0, l_sum, ggml_sum_rows(ctx0, e));
+            }
+
+            if (c == 0) {
+                LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d chunk0: s=[%lld,%lld] e=[%lld,%lld] v_e=[%lld,%lld]\n",
+                    il, s->ne[0], s->ne[1], e->ne[0], e->ne[1], v_e->ne[0], v_e->ne[1]);
             }
         }
-        LLAMA_LOG_ERROR("  kq_rope: [%lld,%lld,%lld,%lld]\n", kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3]);
-        cb(kq_rope, "kq_rope_mla", il);
 
-        // Total attention scores
-        LLAMA_LOG_ERROR("  BEFORE kq_add: kq_nope=[%lld,%lld,%lld,%lld] cont=%d kq_rope=[%lld,%lld,%lld,%lld] cont=%d\n",
-            kq_nope->ne[0],kq_nope->ne[1],kq_nope->ne[2],kq_nope->ne[3],ggml_is_contiguous(kq_nope),
-            kq_rope->ne[0],kq_rope->ne[1],kq_rope->ne[2],kq_rope->ne[3],ggml_is_contiguous(kq_rope));
-        kq_nope = ggml_cont(ctx0, kq_nope);
-        kq_rope = ggml_cont(ctx0, kq_rope);
-        ggml_tensor * kq = ggml_add(ctx0, kq_nope, kq_rope);
-        LLAMA_LOG_ERROR("  AFTER kq_add: kq=[%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
-        cb(kq, "kq_mla", il);
-
-        // Softmax with mask
-        LLAMA_LOG_ERROR("  BEFORE softmax: kq=[%lld,%lld,%lld,%lld] mask=[%lld,%lld,%lld,%lld] scale=%f\n",
-            kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3],
-            kq_mask ? kq_mask->ne[0]:0, kq_mask ? kq_mask->ne[1]:0, kq_mask ? kq_mask->ne[2]:0, kq_mask ? kq_mask->ne[3]:0,
-            kq_scale);
-        ggml_prec_set_acc(kq, GGML_PREC_F32);
-        kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, 0.0f);
-        LLAMA_LOG_ERROR("  AFTER softmax: kq=[%lld,%lld,%lld,%lld]\n", kq->ne[0],kq->ne[1],kq->ne[2],kq->ne[3]);
-        cb(kq, "kq_softmax_mla", il);
-
-        // Attention output: attn = V @ kq
-        // V:  [rank, n_tokens_kv, 1, n_batch] → transpose → [n_tokens_kv, rank, 1, 1]
-        // kq: [n_tokens_kv, n_tokens_q, n_head, 1] → flatten → [n_tokens_kv, n_qh, 1, 1]
-        // result: [rank, n_qh, 1, 1] → reshape → [rank, n_tokens_q, n_head, 1]
-        ggml_tensor * v_attn = v;
-        if (!v_trans) {
-            v_attn = ggml_transpose(ctx0, v_attn);
-        }
-        v_attn = ggml_cont(ctx0, v_attn);
-        // Flatten kq batch dims
-        ggml_tensor * kq_flat = ggml_reshape_4d(ctx0, ggml_cont(ctx0, kq), n_tokens_kv, n_qh, 1, 1);
-        LLAMA_LOG_ERROR("  v_attn: [%lld,%lld,%lld,%lld] kq_flat: [%lld,%lld,%lld,%lld]\n",
-            v_attn->ne[0],v_attn->ne[1],v_attn->ne[2],v_attn->ne[3],
-            kq_flat->ne[0],kq_flat->ne[1],kq_flat->ne[2],kq_flat->ne[3]);
-        ggml_tensor * attn_flat = ggml_mul_mat(ctx0, v_attn, kq_flat);
-        // Reshape: [rank, n_qh, 1, 1] → [rank, n_tokens_q, n_head, 1]
+        // --- Final: attn = acc / l_sum → [rank, n_qh, 1, 1] → [rank, n_tokens_q, n_head, 1] ---
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: acc=[%lld,%lld] l_sum=[%lld,%lld]\n",
+            il, acc->ne[0], acc->ne[1], l_sum->ne[0], l_sum->ne[1]);
+        ggml_tensor * attn_flat = ggml_div(ctx0, acc, l_sum);
         ggml_tensor * attn = ggml_reshape_4d(ctx0, attn_flat, rank, n_tokens_q, n_head, 1);
-        LLAMA_LOG_ERROR("  attn: [%lld,%lld,%lld,%lld]\n", attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
-        cb(attn, "attn_mla", il);
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: attn=[%lld,%lld,%lld,%lld]\n",
+            il, attn->ne[0], attn->ne[1], attn->ne[2], attn->ne[3]);
+        cb(attn, "attn_mla_chunked", il);
 
         // V up-projection: out = v_mla @ attn
         // v_mla: [head_dim, rank, n_head, n_batch] = [256, 256, 24, 1]
