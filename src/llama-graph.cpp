@@ -2932,13 +2932,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_tensor * K_rope_4d = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw),
             n_rot, n_kv_base, n_tokens_kv, n_batch);
 
-        // Scale tensor (created once, reused across all chunks)
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: creating scale tensor...\n", il);
-        ggml_tensor * kq_scale_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: scale tensor created, data=%p\n", il, kq_scale_t->data);
-        *(float *)kq_scale_t->data = kq_scale;
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: scale written, val=%.6f\n", il, *(float *)kq_scale_t->data);
-        ggml_set_input(kq_scale_t);
+        // NOTE: no scale tensor — use ggml_scale() which stores the scalar
+        // as an op attribute (no separate data allocation needed).
+        // ggml_new_tensor_1d in a cgraph context leaves data=NULL until
+        // graph allocation, so direct data writes crash.
 
         // Accumulators (lazy init on first chunk)
         ggml_tensor * acc   = nullptr;  // [rank, n_qh, 1, 1] F32
@@ -2973,8 +2970,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             }
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_after_rope=[%lld,%lld] type=%d\n", il, s->ne[0], s->ne[1], (int)s->type);
 
-            // --- Apply scale ---
-            s = ggml_mul(ctx0, s, kq_scale_t);
+            // --- Apply scale (ggml_scale: scalar stored as op attribute) ---
+            s = ggml_scale(ctx0, s, kq_scale);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_scaled=[%lld,%lld] type=%d\n", il, s->ne[0], s->ne[1], (int)s->type);
 
             // --- Apply causal mask (if present) ---
