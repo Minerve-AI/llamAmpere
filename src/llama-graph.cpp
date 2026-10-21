@@ -1668,6 +1668,10 @@ ggml_tensor * llm_graph_context::build_lora_mm(
             res->src[3] = exl3->svh;
         }
     } else {
+        LLAMA_LOG_ERROR("[MLA-DBG-MM] w: ne=[%lld,%lld] nb=[%zu,%zu] type=%s transposed=%d | cur_mm: ne=[%lld,%lld] nb=[%zu,%zu] transposed=%d | can_mul=%d\n",
+            w->ne[0], w->ne[1], w->nb[0], w->nb[1], ggml_type_name(w->type), (int)ggml_is_transposed(w),
+            cur_mm->ne[0], cur_mm->ne[1], cur_mm->nb[0], cur_mm->nb[1], (int)ggml_is_transposed(cur_mm),
+            (int)(w->ne[1] == cur_mm->ne[0]));
         res = ggml_mul_mat(ctx0, w, cur_mm);
     }
 
