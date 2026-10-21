@@ -635,6 +635,23 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_linear(
 // FFN layer - free function (shared between graph and graph_mtp)
 //
 static ggml_tensor * qwen35mla_build_ffn(llm_graph_context & g, const llama_layer & layer, ggml_tensor * cur, int il) {
+    LLAMA_LOG_ERROR("[MLA-DBG-FFN] il=%d cur: ne=[%lld,%lld] nb=[%zu,%zu] transposed=%d\n",
+        il, cur->ne[0],cur->ne[1], cur->nb[0],cur->nb[1], (int)ggml_is_transposed(cur));
+    if (layer.ffn_up) {
+        LLAMA_LOG_ERROR("[MLA-DBG-FFN] il=%d ffn_up: ne=[%lld,%lld] nb=[%zu,%zu] type=%s transposed=%d\n",
+            il, layer.ffn_up->ne[0],layer.ffn_up->ne[1], layer.ffn_up->nb[0],layer.ffn_up->nb[1],
+            ggml_type_name(layer.ffn_up->type), (int)ggml_is_transposed(layer.ffn_up));
+    }
+    if (layer.ffn_gate) {
+        LLAMA_LOG_ERROR("[MLA-DBG-FFN] il=%d ffn_gate: ne=[%lld,%lld] nb=[%zu,%zu] type=%s transposed=%d\n",
+            il, layer.ffn_gate->ne[0],layer.ffn_gate->ne[1], layer.ffn_gate->nb[0],layer.ffn_gate->nb[1],
+            ggml_type_name(layer.ffn_gate->type), (int)ggml_is_transposed(layer.ffn_gate));
+    }
+    if (layer.ffn_down) {
+        LLAMA_LOG_ERROR("[MLA-DBG-FFN] il=%d ffn_down: ne=[%lld,%lld] nb=[%zu,%zu] type=%s transposed=%d\n",
+            il, layer.ffn_down->ne[0],layer.ffn_down->ne[1], layer.ffn_down->nb[0],layer.ffn_down->nb[1],
+            ggml_type_name(layer.ffn_down->type), (int)ggml_is_transposed(layer.ffn_down));
+    }
     if (layer.ffn_gate == nullptr) {
         // EXL3 fused layout: ffn_up = [gate | up]
         GGML_ASSERT(layer.ffn_up_s == nullptr && layer.ffn_gate_s == nullptr);
