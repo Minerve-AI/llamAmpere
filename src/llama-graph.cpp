@@ -2918,15 +2918,24 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             il, n_tokens_kv, n_qh, n_chunks, MLA_CHUNK);
 
         // Pre-compute V transposed: [n_tokens_kv, rank, 1, n_batch]
+        // V is [rank, n_tokens_kv, 1, 1] → transpose → [n_tokens_kv, rank, 1, 1]
         ggml_tensor * V_t = v;
         if (!v_trans) {
             V_t = ggml_transpose(ctx0, V_t);
         }
         V_t = ggml_cont(ctx0, V_t);
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] V_t: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+            V_t->ne[0],V_t->ne[1],V_t->ne[2],V_t->ne[3],
+            (long long)V_t->nb[0],(long long)V_t->nb[1],(long long)V_t->nb[2],(long long)V_t->nb[3]);
 
         // K_rope as 4D: [n_rot, n_kv_base, n_tokens_kv, n_batch]
         ggml_tensor * K_rope_4d = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw),
             n_rot, n_kv_base, n_tokens_kv, n_batch);
+
+        // Scale tensor (created once, reused across all chunks)
+        ggml_tensor * kq_scale_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+        *(float *)kq_scale_t->data = kq_scale;
+        ggml_set_input(kq_scale_t);
 
         // Accumulators (lazy init on first chunk)
         ggml_tensor * acc   = nullptr;  // [rank, n_qh, 1, 1] F32
@@ -2937,16 +2946,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             const int64_t chunk    = std::min(MLA_CHUNK, n_tokens_kv - kv_start);
 
             // --- K_latent tile: [rank, chunk, 1, 1] ---
+            // K_latent is [rank, n_tokens_kv, 1, 1]: nb[0]=elem, nb[1]=rank*elem
             ggml_tensor * K_t = ggml_cont(ctx0, ggml_view_4d(ctx0, K_latent,
                 rank, chunk, 1, 1,
                 K_latent->nb[0], K_latent->nb[1], K_latent->nb[2],
                 (size_t)kv_start * K_latent->nb[1]));
 
             // --- Scores: nope part [chunk, n_qh, 1, 1] ---
+            // ggml_mul_mat(A,B): A=[K,M] B=[K,N] → [M,N]
+            // K_t=[rank,chunk] Q_nope_flat=[rank,n_qh] → [chunk,n_qh]
             ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_flat);
 
             // --- Add rope contributions (4 small matmuls) ---
             for (int64_t i = 0; i < n_kv_base; i++) {
+                // K_rope_4d is [n_rot, n_kv_base, n_tokens_kv, n_batch]
+                // View: [n_rot, chunk, 1, n_batch] at offset i*nb[1] + kv_start*nb[2]
                 ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
                     n_rot, chunk, 1, n_batch,
                     K_rope_4d->nb[0], K_rope_4d->nb[2], K_rope_4d->nb[3],
@@ -2954,11 +2968,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_add(ctx0, s, ggml_mul_mat(ctx0, Kr, Q_rope_flat));
             }
 
-            // --- Apply scale ---
-            // Scale via GGML_API tensor (ggml_new_f32 is GGML_BACKEND_API, not in Windows DLL)
-            ggml_tensor * kq_scale_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
-            *(float *)kq_scale_t->data = kq_scale;
-            ggml_set_input(kq_scale_t);
+            // --- Apply scale (broadcast: [chunk,n_qh] * [1] → [chunk,n_qh]) ---
             s = ggml_mul(ctx0, s, kq_scale_t);
 
             // --- Apply causal mask (if present) ---
@@ -2982,9 +2992,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             ggml_tensor * e = ggml_exp(ctx0, s);
 
             // --- V tile: [chunk, rank, 1, n_batch] ---
+            // V_t is [n_tokens_kv, rank, 1, n_batch]: nb[0]=elem, nb[1]=n_tok*elem
+            // View: [chunk, rank, 1, n_batch] — stride along dim0 is nb[0], along dim1 is nb[1]
             ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_view_4d(ctx0, V_t,
                 chunk, rank, 1, n_batch,
-                V_t->nb[1], V_t->nb[0], V_t->nb[2],
+                V_t->nb[0], V_t->nb[1], V_t->nb[2],
                 (size_t)kv_start * V_t->nb[0]));
 
             // --- acc += V_tile @ e  [rank, n_qh] ---
