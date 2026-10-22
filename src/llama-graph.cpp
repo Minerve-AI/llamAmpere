@@ -2939,13 +2939,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         //   element [r, g, t, b] → row (g*n_rot + r), col t
         //   offset = r*nb0 + g*(n_rot*nb0) + t*(n_rot*n_kv_base*nb0)
         ggml_tensor * K_rope_cont = ggml_cont(ctx0, K_rope_raw);  // [232, 75008, 1, 1]
+        // ggml_view_4d(ctx, a, ne0,ne1,ne2,ne3, nb1, nb2, nb3, offset)
+        // Data layout per token: [g0:58, g1:58, g2:58, g3:58] → [n_kv_base, n_rot]
+        // We want [n_rot, n_kv_base, n_tokens_kv, n_batch]:
+        //   element [r,g,t,b] → row (g*n_rot+r), col t in K_rope_cont
+        //   nb1 (group stride) = n_rot * elem_size = 116
+        //   nb2 (token stride) = K_rope_cont->nb[1] = 464
         ggml_tensor * K_rope_4d = ggml_view_4d(ctx0, K_rope_cont,
             n_rot, n_kv_base, n_tokens_kv, n_batch,
-            K_rope_cont->nb[0],              // nb[0] = 2 (rotation stride)
-            (size_t)n_rot * K_rope_cont->nb[0],  // nb[1] = 116 (group stride)
-            K_rope_cont->nb[1],              // nb[2] = 464 (token stride)
-            K_rope_cont->nb[2],              // nb[3] (batch stride)
-            0);
+            (size_t)n_rot * K_rope_cont->nb[0],   // nb1 = 116 (group stride)
+            K_rope_cont->nb[1],                   // nb2 = 464 (token stride)
+            K_rope_cont->nb[2],                   // nb3 (batch stride)
+            0);                                   // offset
         LLAMA_LOG_ERROR("  [MLA-CHUNKED] K_rope_4d: ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
             K_rope_4d->ne[0],K_rope_4d->ne[1],K_rope_4d->ne[2],K_rope_4d->ne[3],
             (long long)K_rope_4d->nb[0],(long long)K_rope_4d->nb[1],(long long)K_rope_4d->nb[2],(long long)K_rope_4d->nb[3]);
@@ -2988,7 +2993,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             for (int64_t i = 0; i < n_kv_base; i++) {
                 ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
                     n_rot, chunk, 1, n_batch,
-                    K_rope_4d->nb[0], K_rope_4d->nb[2], K_rope_4d->nb[3],
+                    K_rope_4d->nb[2],   // nb1 = token stride (464)
+                    K_rope_4d->nb[3],   // nb2 = batch stride
+                    0,                  // nb3
                     (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
                 ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr, Q_rope_scaled);
                 s_rope = ggml_cont(ctx0, s_rope);
