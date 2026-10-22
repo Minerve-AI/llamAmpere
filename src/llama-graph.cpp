@@ -2920,16 +2920,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: n_kv=%lld n_tq=%lld n_h=%lld chunks=%lld chunk=%lld\n",
             il, n_tokens_kv, n_tokens_q, n_head, n_chunks, MLA_CHUNK);
 
-        // Pre-compute V transposed: [n_tokens_kv, rank, 1, n_batch]
-        // V is [rank, n_tokens_kv, 1, 1] → transpose → [n_tokens_kv, rank, 1, 1]
-        ggml_tensor * V_t = v;
-        if (!v_trans) {
-            V_t = ggml_transpose(ctx0, V_t);
-        }
-        V_t = ggml_cont(ctx0, V_t);
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] V_t: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
-            V_t->ne[0],V_t->ne[1],V_t->ne[2],V_t->ne[3],
-            (long long)V_t->nb[0],(long long)V_t->nb[1],(long long)V_t->nb[2],(long long)V_t->nb[3]);
+        // V: [256, 1, 75008, 1] — rank=dim0, tokens=dim2
+        // We'll view + transpose per-chunk inside the loop (avoids out-of-bounds
+        // bounding-box issue when viewing the transposed [75008,256,1,1] tensor).
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] V: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+            v->ne[0],v->ne[1],v->ne[2],v->ne[3],
+            (long long)v->nb[0],(long long)v->nb[1],(long long)v->nb[2],(long long)v->nb[3]);
 
         // K_rope as 4D: [n_rot, n_kv_base, n_tokens_kv, n_batch]
         // K_rope_raw is [n_rot*n_kv_base, n_tokens_kv, 1, n_batch] contiguous.
@@ -2971,9 +2967,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: START kv_start=%lld chunk=%lld\n", il, kv_start, chunk);
 
             // --- K_latent tile: [rank, chunk, 1, 1] ---
+            // K_latent: [256,75008,1,1] nb=[2,512,38404096,38404096]
+            // View [256,1024,1,1]: nb1=nb[1](512), nb2=nb[2], nb3=nb[3]
             ggml_tensor * K_t_view = ggml_view_4d(ctx0, K_latent,
                 rank, chunk, 1, 1,
-                K_latent->nb[0], K_latent->nb[1], K_latent->nb[2],
+                K_latent->nb[1], K_latent->nb[2], K_latent->nb[3],
                 (size_t)kv_start * K_latent->nb[1]);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: K_t_view=[%lld,%lld,%lld,%lld]\n", il, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3]);
             ggml_tensor * K_t = ggml_cont(ctx0, K_t_view);
@@ -3039,10 +3037,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 il, e->ne[0],e->ne[1],e->ne[2],e->ne[3], (int)e->type);
 
             // --- V tile: [chunk, rank, 1, nb] ---
-            ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_view_4d(ctx0, V_t,
-                chunk, rank, 1, n_batch,
-                V_t->nb[0], V_t->nb[1], V_t->nb[2],
-                (size_t)kv_start * V_t->nb[0]));
+            // v: [256,1,75008,1] nb=[2,512,512,38404096]
+            // View [256,chunk,1,1] from v (rank,chunk): nb1=v->nb[2](512), nb2=v->nb[1](512), nb3=v->nb[3]
+            // Then transpose → [chunk,256,1,1] + cont
+            ggml_tensor * V_view = ggml_view_4d(ctx0, v,
+                rank, chunk, 1, n_batch,
+                v->nb[2], v->nb[1], v->nb[3],
+                (size_t)kv_start * v->nb[2]);
+            ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_transpose(ctx0, V_view));
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: V_t_tile=[%lld,%lld,%lld,%lld]\n",
                 il, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3]);
 
