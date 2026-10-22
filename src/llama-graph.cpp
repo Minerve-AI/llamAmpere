@@ -3045,11 +3045,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 v->nb[2], v->nb[1], v->nb[3],
                 (size_t)kv_start * v->nb[2]);
             ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_transpose(ctx0, V_view));
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: V_t_tile=[%lld,%lld,%lld,%lld]\n",
-                il, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3]);
+            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: V_t_tile=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+                il, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3],
+                (long long)V_t_tile->nb[0],(long long)V_t_tile->nb[1],(long long)V_t_tile->nb[2],(long long)V_t_tile->nb[3]);
+            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: e=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] type=%d\n",
+                il, e->ne[0],e->ne[1],e->ne[2],e->ne[3],
+                (long long)e->nb[0],(long long)e->nb[1],(long long)e->nb[2],(long long)e->nb[3], (int)e->type);
 
             // --- v_e = V_tile @ e → [rank, n_tq, n_h, nb] ---
-            ggml_tensor * v_e = ggml_mul_mat(ctx0, V_t_tile, e);
+            // Avoid batch-dim broadcasting in ggml_mul_mat (causes OOB internal view).
+            // Flatten e: [chunk, n_tq, n_h, nb] → [chunk, n_tq*n_h*nb]
+            const int64_t e_cols = e->ne[1] * e->ne[2] * e->ne[3];
+            ggml_tensor * e_2d = ggml_reshape_2d(ctx0, e, e->ne[0], e_cols);
+            ggml_tensor * v_e = ggml_mul_mat(ctx0, V_t_tile, e_2d);
+            // Reshape back: [rank, n_tq*n_h*nb] → [rank, n_tq, n_h, nb]
+            v_e = ggml_reshape_4d(ctx0, v_e, v_e->ne[0], n_tokens_q, n_head, n_batch);
             v_e = ggml_cont(ctx0, v_e);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: v_e=[%lld,%lld,%lld,%lld]\n",
                 il, v_e->ne[0],v_e->ne[1],v_e->ne[2],v_e->ne[3]);
