@@ -2892,9 +2892,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         const int64_t n_qh = n_tokens_q * n_head;
         ggml_tensor * Q_nope_flat = ggml_reshape_4d(ctx0, ggml_cont(ctx0, Q_nope), rank, n_qh, 1, 1);
         ggml_tensor * Q_rope_flat = ggml_reshape_4d(ctx0, ggml_cont(ctx0, Q_rope), n_rot, n_qh, 1, 1);
-        LLAMA_LOG_ERROR("  Q_nope_flat: [%lld,%lld,%lld,%lld] Q_rope_flat: [%lld,%lld,%lld,%lld]\n",
-            Q_nope_flat->ne[0],Q_nope_flat->ne[1],Q_nope_flat->ne[2],Q_nope_flat->ne[3],
-            Q_rope_flat->ne[0],Q_rope_flat->ne[1],Q_rope_flat->ne[2],Q_rope_flat->ne[3]);
+        // Pre-scale Q by kq_scale (avoids ggml_scale on ggml_add result which
+        // has a layout that triggers GGML_ASSERT(nelements == ne0*ne1*ne2*ne3))
+        ggml_tensor * Q_nope_scaled = ggml_scale(ctx0, Q_nope_flat, kq_scale);
+        ggml_tensor * Q_rope_scaled = ggml_scale(ctx0, Q_rope_flat, kq_scale);
+        LLAMA_LOG_ERROR("  Q_nope_flat: [%lld,%lld] Q_rope_flat: [%lld,%lld] kq_scale=%.6f\n",
+            Q_nope_flat->ne[0],Q_nope_flat->ne[1],
+            Q_rope_flat->ne[0],Q_rope_flat->ne[1], kq_scale);
 
         // Split K: [rank+n_rot*n_kv_base, n_tokens_kv, 1, n_batch]
         ggml_tensor * K_latent_raw = ggml_view_4d(ctx0, k, rank, n_tokens_kv, 1, n_batch,
@@ -2956,8 +2960,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             ggml_tensor * K_t = ggml_cont(ctx0, K_t_view);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: K_t cont=[%lld,%lld,%lld,%lld] cont=%d\n", il, K_t->ne[0],K_t->ne[1],K_t->ne[2],K_t->ne[3], ggml_is_contiguous(K_t));
 
-            // --- Scores: nope part [chunk, n_qh, 1, 1] ---
-            ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_flat);
+            // --- Scores: nope part [chunk, n_qh, 1, 1] (Q pre-scaled) ---
+            ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_scaled);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_nope=[%lld,%lld,%lld,%lld] type=%d\n", il, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
 
             // --- Add rope contributions (4 small matmuls) ---
@@ -2966,12 +2970,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                     n_rot, chunk, 1, n_batch,
                     K_rope_4d->nb[0], K_rope_4d->nb[2], K_rope_4d->nb[3],
                     (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
-                s = ggml_add(ctx0, s, ggml_mul_mat(ctx0, Kr, Q_rope_flat));
+                s = ggml_add(ctx0, s, ggml_mul_mat(ctx0, Kr, Q_rope_scaled));
             }
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_after_rope=[%lld,%lld] type=%d\n", il, s->ne[0], s->ne[1], (int)s->type);
-
-            // --- Apply scale (ggml_scale: scalar stored as op attribute) ---
-            s = ggml_scale(ctx0, s, kq_scale);
             if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_scaled=[%lld,%lld] type=%d\n", il, s->ne[0], s->ne[1], (int)s->type);
 
             // --- Apply causal mask (if present) ---
