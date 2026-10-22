@@ -2932,8 +2932,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             (long long)V_t->nb[0],(long long)V_t->nb[1],(long long)V_t->nb[2],(long long)V_t->nb[3]);
 
         // K_rope as 4D: [n_rot, n_kv_base, n_tokens_kv, n_batch]
-        ggml_tensor * K_rope_4d = ggml_reshape_4d(ctx0, ggml_cont(ctx0, K_rope_raw),
-            n_rot, n_kv_base, n_tokens_kv, n_batch);
+        // K_rope_raw is [n_rot*n_kv_base, n_tokens_kv, 1, n_batch] contiguous.
+        // Data layout per token: [group0_rot0..57, group1_rot0..57, ...] = [n_kv_base, n_rot]
+        // So the 232-row dim is [n_kv_base * n_rot] with n_rot fastest.
+        // We want [n_rot, n_kv_base, n_tokens_kv, n_batch]:
+        //   element [r, g, t, b] → row (g*n_rot + r), col t
+        //   offset = r*nb0 + g*(n_rot*nb0) + t*(n_rot*n_kv_base*nb0)
+        ggml_tensor * K_rope_cont = ggml_cont(ctx0, K_rope_raw);  // [232, 75008, 1, 1]
+        ggml_tensor * K_rope_4d = ggml_view_4d(ctx0, K_rope_cont,
+            n_rot, n_kv_base, n_tokens_kv, n_batch,
+            K_rope_cont->nb[0],              // nb[0] = 2 (rotation stride)
+            (size_t)n_rot * K_rope_cont->nb[0],  // nb[1] = 116 (group stride)
+            K_rope_cont->nb[1],              // nb[2] = 464 (token stride)
+            K_rope_cont->nb[2],              // nb[3] (batch stride)
+            0);
+        LLAMA_LOG_ERROR("  [MLA-CHUNKED] K_rope_4d: ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+            K_rope_4d->ne[0],K_rope_4d->ne[1],K_rope_4d->ne[2],K_rope_4d->ne[3],
+            (long long)K_rope_4d->nb[0],(long long)K_rope_4d->nb[1],(long long)K_rope_4d->nb[2],(long long)K_rope_4d->nb[3]);
 
         // NOTE: no scale tensor — use ggml_scale() which stores the scalar
         // as an op attribute (no separate data allocation needed).
