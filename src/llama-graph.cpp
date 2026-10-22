@@ -2880,6 +2880,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         LLAMA_LOG_ERROR("  n_rot=%lld rank=%lld n_kv_base=%lld n_head=%lld n_tokens_q=%lld n_tokens_kv=%lld\n",
             n_rot, rank, n_kv_base, n_head, n_tokens_q, n_tokens_kv);
 
+        // Make Q contiguous: after permute(0,2,1,3) the strides are non-standard
+        // (nb1 > nb2), causing Q_rope view bounding box to exceed data size.
+        q = ggml_cont(ctx0, q);
+
         // Split Q: [rank+n_rot, n_tokens_q, n_head, n_batch]
         ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, n_tokens_q, n_head, n_batch,
             q->nb[0], q->nb[1], q->nb[2], 0);
