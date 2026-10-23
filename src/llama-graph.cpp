@@ -2881,14 +2881,27 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             n_rot, rank, n_kv_base, n_head, n_tokens_q, n_tokens_kv);
 
         // Make Q contiguous: after permute(0,2,1,3) the strides are non-standard
-        // (nb1 > nb2), causing Q_rope view bounding box to exceed data size.
+        // (nb1 > nb2), causing view bounding boxes to exceed data size.
         q = ggml_cont(ctx0, q);
+        LLAMA_LOG_ERROR("  Q cont: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] cont=%d nbytes=%lld\n",
+            q->ne[0],q->ne[1],q->ne[2],q->ne[3],
+            (long long)q->nb[0],(long long)q->nb[1],(long long)q->nb[2],(long long)q->nb[3],
+            (int)ggml_is_contiguous(q), (long long)ggml_nbytes(q));
 
         // Split Q: [rank+n_rot, n_tokens_q, n_head, n_batch]
+        // ggml_view_4d(ctx, a, ne0,ne1,ne2,ne3, nb1, nb2, nb3, offset)
+        // nb1/2/3 = strides for dims 1/2/3 of SOURCE (not 0/1/2!)
         ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, n_tokens_q, n_head, n_batch,
-            q->nb[0], q->nb[1], q->nb[2], 0);
+            q->nb[1], q->nb[2], q->nb[3], 0);
         ggml_tensor * Q_rope = ggml_view_4d(ctx0, q, n_rot, n_tokens_q, n_head, n_batch,
-            q->nb[0], q->nb[1], q->nb[2], (size_t)rank * q->nb[0]);
+            q->nb[1], q->nb[2], q->nb[3], (size_t)rank * q->nb[0]);
+        LLAMA_LOG_ERROR("  Q_nope: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] off=0\n",
+            Q_nope->ne[0],Q_nope->ne[1],Q_nope->ne[2],Q_nope->ne[3],
+            (long long)Q_nope->nb[0],(long long)Q_nope->nb[1],(long long)Q_nope->nb[2],(long long)Q_nope->nb[3]);
+        LLAMA_LOG_ERROR("  Q_rope: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] off=%lld\n",
+            Q_rope->ne[0],Q_rope->ne[1],Q_rope->ne[2],Q_rope->ne[3],
+            (long long)Q_rope->nb[0],(long long)Q_rope->nb[1],(long long)Q_rope->nb[2],(long long)Q_rope->nb[3],
+            (long long)(rank * q->nb[0]));
 
         // Keep Q as [dim, n_tokens_q, n_head, n_batch] — NOT flattened.
         // This produces score [chunk, n_tokens_q, n_head, 1] which supports
@@ -2904,10 +2917,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             Q_rope_c->ne[0],Q_rope_c->ne[1],Q_rope_c->ne[2],Q_rope_c->ne[3], kq_scale);
 
         // Split K: [rank+n_rot*n_kv_base, n_tokens_kv, 1, n_batch]
+        // k: [488,75008,1,1] after permute → nb=[2,976,976,73207808]
         ggml_tensor * K_latent_raw = ggml_view_4d(ctx0, k, rank, n_tokens_kv, 1, n_batch,
-            k->nb[0], k->nb[1], k->nb[2], 0);
+            k->nb[1], k->nb[2], k->nb[3], 0);
         ggml_tensor * K_rope_raw = ggml_view_4d(ctx0, k, n_rot * n_kv_base, n_tokens_kv, 1, n_batch,
-            k->nb[0], k->nb[1], k->nb[2], (size_t)rank * k->nb[0]);
+            k->nb[1], k->nb[2], k->nb[3], (size_t)rank * k->nb[0]);
 
         // Make contiguous (required by ggml_mul_mat)
         ggml_tensor * K_latent = ggml_cont(ctx0, K_latent_raw);
