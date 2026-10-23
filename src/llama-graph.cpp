@@ -3002,7 +3002,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             const int64_t q_cols = Q_nope_scaled->ne[1] * Q_nope_scaled->ne[2] * Q_nope_scaled->ne[3];
             ggml_tensor * Q_flat = ggml_reshape_2d(ctx0, Q_nope_scaled, Q_nope_scaled->ne[0], q_cols);
             ggml_tensor * K_t_T = ggml_transpose(ctx0, K_t);  // [chunk, rank, 1, 1]
-            s = ggml_mul_mat(ctx0, K_t_T, Q_flat);  // [chunk, q_cols, 1, 1]
+            ggml_tensor * s = ggml_mul_mat(ctx0, K_t_T, Q_flat);  // [chunk, q_cols, 1, 1]
             s = ggml_reshape_4d(ctx0, s, s->ne[0], n_tokens_q, n_head, n_batch);
             s = ggml_cont(ctx0, s);
             LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_nope=[%lld,%lld,%lld,%lld] type=%d\n",
