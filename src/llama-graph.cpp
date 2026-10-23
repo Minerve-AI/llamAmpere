@@ -2998,14 +2998,22 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // --- Scores: nope part [chunk, n_tokens_q, n_head, n_batch] ---
             // K_t: [rank, chunk, 1, 1]  ×  Q_nope: [rank, n_tq, n_h, nb]
             // → [chunk, n_tq, n_h, nb]
-            ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_scaled);
+            // Avoid batch-dim broadcasting: flatten Q to 2D, transpose K, do simple matmul.
+            const int64_t q_cols = Q_nope_scaled->ne[1] * Q_nope_scaled->ne[2] * Q_nope_scaled->ne[3];
+            ggml_tensor * Q_flat = ggml_reshape_2d(ctx0, Q_nope_scaled, Q_nope_scaled->ne[0], q_cols);
+            ggml_tensor * K_t_T = ggml_transpose(ctx0, K_t);  // [chunk, rank, 1, 1]
+            s = ggml_mul_mat(ctx0, K_t_T, Q_flat);  // [chunk, q_cols, 1, 1]
+            s = ggml_reshape_4d(ctx0, s, s->ne[0], n_tokens_q, n_head, n_batch);
             s = ggml_cont(ctx0, s);
             LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_nope=[%lld,%lld,%lld,%lld] type=%d\n",
                 il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
 
             // --- Add rope contributions (4 small matmuls) ---
             // Kr: [n_rot, chunk, 1, nb]  ×  Q_rope: [n_rot, n_tq, n_h, nb]
-            // → [chunk, n_tq, n_h, nb]  (all heads get all rope keys — approximation)
+            // → [chunk, n_tq, n_h, nb]
+            // Avoid batch-dim broadcasting: flatten Q, transpose K, simple matmul.
+            const int64_t q_rope_cols = Q_rope_scaled->ne[1] * Q_rope_scaled->ne[2] * Q_rope_scaled->ne[3];
+            ggml_tensor * Q_rope_flat = ggml_reshape_2d(ctx0, Q_rope_scaled, Q_rope_scaled->ne[0], q_rope_cols);
             for (int64_t i = 0; i < n_kv_base; i++) {
                 ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
                     n_rot, chunk, 1, n_batch,
@@ -3013,7 +3021,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                     K_rope_4d->nb[3],   // nb2 = batch stride
                     0,                  // nb3
                     (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
-                ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr, Q_rope_scaled);
+                ggml_tensor * Kr_T = ggml_transpose(ctx0, Kr);  // [chunk, n_rot, 1, nb]
+                ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr_T, Q_rope_flat);  // [chunk, q_rope_cols, 1, nb]
+                s_rope = ggml_reshape_4d(ctx0, s_rope, s_rope->ne[0], n_tokens_q, n_head, n_batch);
                 s_rope = ggml_cont(ctx0, s_rope);
                 s = ggml_add(ctx0, s, s_rope);
                 s = ggml_cont(ctx0, s);
