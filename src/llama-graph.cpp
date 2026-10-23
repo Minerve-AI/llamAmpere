@@ -2982,7 +2982,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             const int64_t kv_start = c * MLA_CHUNK;
             const int64_t chunk    = std::min(MLA_CHUNK, n_tokens_kv - kv_start);
 
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: START kv_start=%lld chunk=%lld\n", il, kv_start, chunk);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: START kv_start=%lld chunk=%lld\n", il, c, kv_start, chunk);
 
             // --- K_latent tile: [rank, chunk, 1, 1] ---
             // K_latent: [256,75008,1,1] nb=[2,512,38404096,38404096]
@@ -2991,17 +2991,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 rank, chunk, 1, 1,
                 K_latent->nb[1], K_latent->nb[2], K_latent->nb[3],
                 (size_t)kv_start * K_latent->nb[1]);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: K_t_view=[%lld,%lld,%lld,%lld]\n", il, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3]);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t_view=[%lld,%lld,%lld,%lld]\n", il, c, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3]);
             ggml_tensor * K_t = ggml_cont(ctx0, K_t_view);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: K_t cont=[%lld,%lld,%lld,%lld] cont=%d\n", il, K_t->ne[0],K_t->ne[1],K_t->ne[2],K_t->ne[3], ggml_is_contiguous(K_t));
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t=[%lld,%lld,%lld,%lld] cont=%d\n", il, c, K_t->ne[0],K_t->ne[1],K_t->ne[2],K_t->ne[3], ggml_is_contiguous(K_t));
 
             // --- Scores: nope part [chunk, n_tokens_q, n_head, n_batch] ---
             // K_t: [rank, chunk, 1, 1]  ×  Q_nope: [rank, n_tq, n_h, nb]
             // → [chunk, n_tq, n_h, nb]
             ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_scaled);
             s = ggml_cont(ctx0, s);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_nope=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_nope=[%lld,%lld,%lld,%lld] type=%d\n",
+                il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
 
             // --- Add rope contributions (4 small matmuls) ---
             // Kr: [n_rot, chunk, 1, nb]  ×  Q_rope: [n_rot, n_tq, n_h, nb]
@@ -3018,29 +3018,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_add(ctx0, s, s_rope);
                 s = ggml_cont(ctx0, s);
             }
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s=[%lld,%lld,%lld,%lld] type=%d\n",
+                il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
 
             // --- Apply causal mask ---
-            // mask: [n_tq, n_kv] → view [chunk, n_tq, 1, 1] → broadcast over heads
+            // kq_mask: [n_tokens_q, n_tokens_kv, 1, 1] with nb=[n_kv*4, 4, ...]
+            // View: [chunk, n_tq, 1, 1] → ne0=chunk(key from dim1), ne1=n_tq(query from dim0)
+            // Strides: nb1=kq_mask->nb[0](query stride), nb2=kq_mask->nb[2], nb3=kq_mask->nb[3]
+            // Offset: kv_start * kq_mask->nb[1] (key stride = 4)
             if (kq_mask) {
-                // kq_mask is [n_tokens_q, n_tokens_kv, ...] with strides [n_kv, 1, ...]
-                // We need [chunk, n_tq, 1, 1]: key dim first (stride 1), query dim second (stride n_kv)
+                if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: kq_mask=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+                    il, kq_mask->ne[0],kq_mask->ne[1],kq_mask->ne[2],kq_mask->ne[3],
+                    (long long)kq_mask->nb[0],(long long)kq_mask->nb[1],(long long)kq_mask->nb[2],(long long)kq_mask->nb[3]);
                 ggml_tensor * mt = ggml_view_4d(ctx0, kq_mask,
                     chunk, n_tokens_q, 1, 1,
-                    kq_mask->nb[1],   // key stride (= 1 for contiguous)
-                    kq_mask->nb[0],   // query stride (= n_tokens_kv)
-                    (size_t)(chunk * n_tokens_q),
-                    (size_t)kv_start * kq_mask->nb[1]);
+                    kq_mask->nb[0],   // nb1 = query stride
+                    kq_mask->nb[2],   // nb2 = dim2 stride
+                    kq_mask->nb[3],   // nb3 = dim3 stride
+                    (size_t)kv_start * kq_mask->nb[1]);  // offset = kv_start * key_stride
                 mt = ggml_cont(ctx0, mt);
                 mt = ggml_cast(ctx0, mt, GGML_TYPE_F32);
                 mt = ggml_cont(ctx0, mt);
                 s = ggml_add(ctx0, s, mt);  // broadcast [chunk,n_tq,1,1] → [chunk,n_tq,n_h,nb]
                 s = ggml_cont(ctx0, s);
-                if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: s_masked=[%lld,%lld,%lld,%lld]\n",
-                    il, s->ne[0],s->ne[1],s->ne[2],s->ne[3]);
-            } else if (c == 0) {
-                LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: no mask\n", il);
+                LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_masked=[%lld,%lld,%lld,%lld]\n",
+                    il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3]);
             }
 
             // --- Cast to F32 + cont ---
@@ -3051,8 +3053,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // --- exp + cont ---
             ggml_tensor * e = ggml_exp(ctx0, s);
             e = ggml_cont(ctx0, e);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: e=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, e->ne[0],e->ne[1],e->ne[2],e->ne[3], (int)e->type);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: e=[%lld,%lld,%lld,%lld] type=%d\n",
+                il, c, e->ne[0],e->ne[1],e->ne[2],e->ne[3], (int)e->type);
 
             // --- V tile: [chunk, rank, 1, nb] ---
             // v: [256,1,75008,1] nb=[2,512,512,38404096]
@@ -3063,12 +3065,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 v->nb[2], v->nb[1], v->nb[3],
                 (size_t)kv_start * v->nb[2]);
             ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_transpose(ctx0, V_view));
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: V_t_tile=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
-                il, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3],
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: V_t_tile=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+                il, c, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3],
                 (long long)V_t_tile->nb[0],(long long)V_t_tile->nb[1],(long long)V_t_tile->nb[2],(long long)V_t_tile->nb[3]);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: e=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, e->ne[0],e->ne[1],e->ne[2],e->ne[3],
-                (long long)e->nb[0],(long long)e->nb[1],(long long)e->nb[2],(long long)e->nb[3], (int)e->type);
 
             // --- v_e = V_tile @ e → [rank, n_tq, n_h, nb] ---
             // Avoid batch-dim broadcasting in ggml_mul_mat (causes OOB internal view).
@@ -3079,8 +3078,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // Reshape back: [rank, n_tq*n_h*nb] → [rank, n_tq, n_h, nb]
             v_e = ggml_reshape_4d(ctx0, v_e, v_e->ne[0], n_tokens_q, n_head, n_batch);
             v_e = ggml_cont(ctx0, v_e);
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: v_e=[%lld,%lld,%lld,%lld]\n",
-                il, v_e->ne[0],v_e->ne[1],v_e->ne[2],v_e->ne[3]);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: v_e=[%lld,%lld,%lld,%lld]\n",
+                il, c, v_e->ne[0],v_e->ne[1],v_e->ne[2],v_e->ne[3]);
 
             if (acc == nullptr) {
                 acc   = v_e;
@@ -3094,8 +3093,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 l_sum = ggml_add(ctx0, l_sum, sr);
                 l_sum = ggml_cont(ctx0, l_sum);
             }
-            if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=0: acc=[%lld,%lld,%lld,%lld] l_sum=[%lld,%lld,%lld,%lld] DONE\n",
-                il, acc->ne[0],acc->ne[1],acc->ne[2],acc->ne[3],
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: acc=[%lld,%lld,%lld,%lld] l_sum=[%lld,%lld,%lld,%lld] DONE\n",
+                il, c, acc->ne[0],acc->ne[1],acc->ne[2],acc->ne[3],
                 l_sum->ne[0],l_sum->ne[1],l_sum->ne[2],l_sum->ne[3]);
         }
 
