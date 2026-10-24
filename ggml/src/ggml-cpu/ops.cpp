@@ -574,8 +574,49 @@ void ggml_compute_forward_dup(
             } break;
         default:
             {
-                if (ggml_is_quantized(src0->type) && dst->type == GGML_TYPE_F32) {
-                    ggml_compute_forward_dup_from_q(params, dst);
+                if (ggml_is_quantized(src0->type)) {
+                    if (dst->type == GGML_TYPE_F32) {
+                        ggml_compute_forward_dup_from_q(params, dst);
+                    } else if (dst->type == GGML_TYPE_F16 || dst->type == GGML_TYPE_BF16) {
+                        // Dequantize to F32 stack buffer, then cast to F16/BF16
+                        const ggml_type type = src0->type;
+                        ggml_to_float_t const dequantize_row_q = ggml_get_type_traits(type)->to_float;
+                        const size_t qk = ggml_blck_size(type);
+                        const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+                        const int64_t ne10 = dst->ne[0],   ne11 = dst->ne[1],   ne12 = dst->ne[2],   ne13 = dst->ne[3];
+                        const size_t  nb00 = src0->nb[0],  nb01 = src0->nb[1],  nb02 = src0->nb[2],  nb03 = src0->nb[3];
+                        const size_t  nb10 = dst->nb[0],   nb11 = dst->nb[1],   nb12 = dst->nb[2],   nb13 = dst->nb[3];
+                        const int64_t nr = ggml_nelements(src0) / qk;
+                        const int ith = params->ith;
+                        const int nth = params->nth;
+                        const int dr = (nr + nth - 1) / nth;
+                        const int ir0 = dr * ith;
+                        const int ir1 = std::min(ir0 + dr, (int)nr);
+                        float buf[qk];
+                        for (int ir = ir0; ir < ir1; ++ir) {
+                            uint32_t i = ir * qk;
+                            const int64_t i03 = i/(ne00*ne01*ne02);
+                            const int64_t i02 = (i - i03*ne00*ne01*ne02)/(ne00*ne01);
+                            const int64_t i01 = (i - i03*ne00*ne01*ne02 - i02*ne01*ne00)/ne00;
+                            const int64_t i00 = i - i03*ne00*ne01*ne02 - i02*ne01*ne00 - i01*ne00;
+                            const int64_t x_offset = (i00/qk)*nb00 + i01*nb01 + i02*nb02 + i03*nb03;
+                            const int64_t i13 = i/(ne10*ne11*ne12);
+                            const int64_t i12 = (i - i13*ne10*ne11*ne12)/(ne10*ne11);
+                            const int64_t i11 = (i - i13*ne10*ne11*ne12 - i12*ne10*ne11)/ne10;
+                            const int64_t i10 = i - i13*ne10*ne11*ne12 - i12*ne10*ne11 - i11*ne10;
+                            const int64_t dst_offset = i10*nb10 + i11*nb11 + i12*nb12 + i13*nb13;
+                            dequantize_row_q((const void*)((char*)src0->data + x_offset), buf, qk);
+                            if (dst->type == GGML_TYPE_F16) {
+                                auto* d = (ggml_fp16_t*)((char*)dst->data + dst_offset);
+                                for (size_t j = 0; j < qk; j++) d[j] = ggml_fp32_to_fp16(buf[j]);
+                            } else {
+                                auto* d = (ggml_bf16_t*)((char*)dst->data + dst_offset);
+                                for (size_t j = 0; j < qk; j++) d[j] = ggml_fp32_to_bf16(buf[j]);
+                            }
+                        }
+                    } else {
+                        GGML_ABORT("quantized dup to %s not supported on CPU", ggml_type_name(dst->type));
+                    }
                     break;
                 }
                 GGML_ABORT("fatal error");
