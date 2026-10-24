@@ -83,6 +83,29 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
         for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
             hparams.is_recr_impl[i] = (i < hparams.n_layer()) && ((i + 1) % full_attn_interval != 0);
         }
+        LLAMA_LOG_ERROR("[MLA-META] WARNING: attention.recurrent_layers NOT in GGUF, using fallback interval=%u\n", full_attn_interval);
+    }
+
+    // LOG: verify metadata
+    {
+        uint32_t n_full = 0, n_recr = 0;
+        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
+            if (hparams.is_recr_impl[i]) n_recr++; else n_full++;
+        }
+        LLAMA_LOG_ERROR("[MLA-META] n_layer_all=%u full_attn=%u linear=%u\n", hparams.n_layer_all, n_full, n_recr);
+        LLAMA_LOG_ERROR("[MLA-META] is_recr: ");
+        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) LLAMA_LOG_ERROR("%d", hparams.is_recr_impl[i]);
+        LLAMA_LOG_ERROR("\n");
+        LLAMA_LOG_ERROR("[MLA-META] mla_rank: ");
+        for (uint32_t i = 0; i < hparams.n_layer_all; ++i) LLAMA_LOG_ERROR("%u", hparams.mla_kv_lora_rank_arr[i]);
+        LLAMA_LOG_ERROR("\n");
+        LLAMA_LOG_ERROR("[MLA-META] n_embd_head_k_mla=%u n_embd_head_v_mla=%u rope_dim=%u\n",
+            hparams.n_embd_head_k_mla_impl, hparams.n_embd_head_v_mla_impl, hparams.mla_qk_rope_head_dim);
+        for (uint32_t i = 0; i < hparams.n_layer(); ++i) {
+            if (!hparams.is_recr(i)) {
+                LLAMA_LOG_ERROR("[MLA-META]   full_attn layer %u: n_head_kv=%u mla_rank=%u\n", i, hparams.n_head_kv_arr[i], hparams.mla_kv_lora_rank_arr[i]);
+            }
+        }
     }
 
     switch (hparams.n_layer()) {
