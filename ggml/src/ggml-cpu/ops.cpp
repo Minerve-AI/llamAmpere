@@ -592,7 +592,7 @@ void ggml_compute_forward_dup(
                         const int dr = (nr + nth - 1) / nth;
                         const int ir0 = dr * ith;
                         const int ir1 = std::min(ir0 + dr, (int)nr);
-                        float buf[qk];
+                        float buf[256]; // max qk for any quantized type
                         for (int ir = ir0; ir < ir1; ++ir) {
                             uint32_t i = ir * qk;
                             const int64_t i03 = i/(ne00*ne01*ne02);
