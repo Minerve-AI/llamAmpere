@@ -3046,12 +3046,16 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: kq_mask=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
                     il, kq_mask->ne[0],kq_mask->ne[1],kq_mask->ne[2],kq_mask->ne[3],
                     (long long)kq_mask->nb[0],(long long)kq_mask->nb[1],(long long)kq_mask->nb[2],(long long)kq_mask->nb[3]);
+                // kq_mask: [n_kv, n_tq, 1, 1] — dim0=key(nb0=2), dim1=query(nb1=150016)
+                // View: [chunk, n_tq, 1, 1] — dim0=key chunk, dim1=query
+                // nb1 = query stride in source = kq_mask->nb[1]
+                // offset = kv_start * key stride in source = kv_start * kq_mask->nb[0]
                 ggml_tensor * mt = ggml_view_4d(ctx0, kq_mask,
                     chunk, n_tokens_q, 1, 1,
-                    kq_mask->nb[0],   // nb1 = query stride
+                    kq_mask->nb[1],   // nb1 = query stride (150016)
                     kq_mask->nb[2],   // nb2 = dim2 stride
                     kq_mask->nb[3],   // nb3 = dim3 stride
-                    (size_t)kv_start * kq_mask->nb[1]);  // offset = kv_start * key_stride
+                    (size_t)kv_start * kq_mask->nb[0]);  // offset = kv_start * key_stride (2)
                 mt = ggml_cont(ctx0, mt);
                 mt = ggml_cast(ctx0, mt, GGML_TYPE_F32);
                 mt = ggml_cont(ctx0, mt);
