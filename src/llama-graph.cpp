@@ -2930,7 +2930,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         // Replaces the O(n_kv * n_qh) full-matrix approach with O(CHUNK * n_qh) tiles.
         // Numerically safe: MLA scores after kq_scale are bounded (~[-10,10]) due to
         // RMS-normed latents, so exp() won't overflow F32.
-        const int64_t MLA_CHUNK = 1024;
+        const int64_t MLA_CHUNK = 4096;
         const int64_t n_chunks = (n_tokens_kv + MLA_CHUNK - 1) / MLA_CHUNK;
 
         LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: n_kv=%lld n_tq=%lld n_h=%lld chunks=%lld chunk=%lld\n",
