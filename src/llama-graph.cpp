@@ -2983,13 +2983,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: START kv_start=%lld chunk=%lld\n", il, c, kv_start, chunk);
 
             // --- K_latent tile: [rank, chunk, 1, 1] ---
-            // K_latent: [256,75008,1,1] nb=[2,512,38404096,38404096]
-            // View [256,1024,1,1]: nb1=nb[1](512), nb2=nb[2], nb3=nb[3]
+            if (c == 0 || c == 1) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_latent ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%lld cont=%d\n",
+                il, c, K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3],
+                (long long)K_latent->nb[0],(long long)K_latent->nb[1],(long long)K_latent->nb[2],(long long)K_latent->nb[3],
+                (long long)ggml_nbytes(K_latent), ggml_is_contiguous(K_latent));
+            const size_t k_offs = (size_t)kv_start * K_latent->nb[1];
+            const size_t k_data_size = (size_t)rank * chunk * ggml_type_size(K_latent->type);
+            if (c == 0 || c == 1) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: k_offs=%lld k_data_size=%lld k_offs+k_data_size=%lld K_latent_nbytes=%lld\n",
+                il, c, (long long)k_offs, (long long)k_data_size, (long long)(k_offs + k_data_size), (long long)ggml_nbytes(K_latent));
             ggml_tensor * K_t_view = ggml_view_4d(ctx0, K_latent,
                 rank, chunk, 1, 1,
                 K_latent->nb[1], K_latent->nb[2], K_latent->nb[3],
-                (size_t)kv_start * K_latent->nb[1]);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t_view=[%lld,%lld,%lld,%lld]\n", il, c, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3]);
+                k_offs);
+            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t_view=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n", il, c, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3],
+                (long long)K_t_view->nb[0],(long long)K_t_view->nb[1],(long long)K_t_view->nb[2],(long long)K_t_view->nb[3]);
             ggml_tensor * K_t = ggml_cont(ctx0, K_t_view);
             LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t=[%lld,%lld,%lld,%lld] cont=%d\n", il, c, K_t->ne[0],K_t->ne[1],K_t->ne[2],K_t->ne[3], ggml_is_contiguous(K_t));
 
