@@ -2930,218 +2930,167 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         // Replaces the O(n_kv * n_qh) full-matrix approach with O(CHUNK * n_qh) tiles.
         // Numerically safe: MLA scores after kq_scale are bounded (~[-10,10]) due to
         // RMS-normed latents, so exp() won't overflow F32.
-        const int64_t MLA_CHUNK = 4096;
-        const int64_t n_chunks = (n_tokens_kv + MLA_CHUNK - 1) / MLA_CHUNK;
+        // === DOUBLE-TILE FLASH MLA ATTENTION (chunk BOTH queries and keys) ===
+        // The previous KV-chunked approach built score tiles of
+        //   [CHUNK_KV, n_tokens_q, n_head, n_batch]  (f32)
+        // which for n_tokens_q = 75008 is 4096*75008*24*4 ~= 29.6 GB per tile and
+        // overflows the GPU compute buffer.  Tiling the queries as well bounds every
+        // score matrix to [CHUNK_KV, CHUNK_Q, n_head, n_batch] ~= 102 MB.
+        //
+        // Numerically safe: MLA scores after kq_scale are bounded (~[-10,10]) due to
+        // RMS-normed latents, so exp() won't overflow F32.
+        const int64_t CHUNK_Q  = 1024;
+        const int64_t CHUNK_KV = 1024;
+        const int64_t n_q_tiles  = (n_tokens_q  + CHUNK_Q  - 1) / CHUNK_Q;
+        const int64_t n_kv_tiles = (n_tokens_kv + CHUNK_KV - 1) / CHUNK_KV;
 
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: n_kv=%lld n_tq=%lld n_h=%lld chunks=%lld chunk=%lld\n",
-            il, n_tokens_kv, n_tokens_q, n_head, n_chunks, MLA_CHUNK);
-
-        // V: [256, 1, 75008, 1] — rank=dim0, tokens=dim2
-        // We'll view + transpose per-chunk inside the loop (avoids out-of-bounds
-        // bounding-box issue when viewing the transposed [75008,256,1,1] tensor).
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] V: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
+        LLAMA_LOG_ERROR("  [MLA-2TILE] il=%d: n_kv=%lld n_tq=%lld n_h=%lld n_batch=%lld CHUNK_Q=%lld CHUNK_KV=%lld n_q_tiles=%lld n_kv_tiles=%lld\n",
+            il, n_tokens_kv, n_tokens_q, n_head, n_batch, CHUNK_Q, CHUNK_KV, n_q_tiles, n_kv_tiles);
+        LLAMA_LOG_ERROR("  [MLA-2TILE] V: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
             v->ne[0],v->ne[1],v->ne[2],v->ne[3],
             (long long)v->nb[0],(long long)v->nb[1],(long long)v->nb[2],(long long)v->nb[3]);
 
-        // K_rope as 4D: [n_rot, n_kv_base, n_tokens_kv, n_batch]
-        // K_rope_raw is [n_rot*n_kv_base, n_tokens_kv, 1, n_batch] contiguous.
-        // Data layout per token: [group0_rot0..57, group1_rot0..57, ...] = [n_kv_base, n_rot]
-        // So the 232-row dim is [n_kv_base * n_rot] with n_rot fastest.
-        // We want [n_rot, n_kv_base, n_tokens_kv, n_batch]:
-        //   element [r, g, t, b] → row (g*n_rot + r), col t
-        //   offset = r*nb0 + g*(n_rot*nb0) + t*(n_rot*n_kv_base*nb0)
-        ggml_tensor * K_rope_cont = ggml_cont(ctx0, K_rope_raw);  // [232, 75008, 1, 1]
-        // ggml_view_4d(ctx, a, ne0,ne1,ne2,ne3, nb1, nb2, nb3, offset)
-        // Data layout per token: [g0:58, g1:58, g2:58, g3:58] → [n_kv_base, n_rot]
-        // We want [n_rot, n_kv_base, n_tokens_kv, n_batch]:
-        //   element [r,g,t,b] → row (g*n_rot+r), col t in K_rope_cont
-        //   nb1 (group stride) = n_rot * elem_size = 116
-        //   nb2 (token stride) = K_rope_cont->nb[1] = 464
-        ggml_tensor * K_rope_4d = ggml_view_4d(ctx0, K_rope_cont,
-            n_rot, n_kv_base, n_tokens_kv, n_batch,
-            (size_t)n_rot * K_rope_cont->nb[0],   // nb1 = 116 (group stride)
-            K_rope_cont->nb[1],                   // nb2 = 464 (token stride)
-            K_rope_cont->nb[2],                   // nb3 (batch stride)
-            0);                                   // offset
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] K_rope_4d: ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
-            K_rope_4d->ne[0],K_rope_4d->ne[1],K_rope_4d->ne[2],K_rope_4d->ne[3],
-            (long long)K_rope_4d->nb[0],(long long)K_rope_4d->nb[1],(long long)K_rope_4d->nb[2],(long long)K_rope_4d->nb[3]);
+        // Q_nope_scaled / Q_rope_scaled are 2D and contiguous: [rank|n_rot, q_cols]
+        // where q_cols = n_tokens_q * n_head * n_batch.  To extract a query tile we
+        // reshape to 4D, view the tile, cont, then reshape back to 2D.
+        ggml_tensor * Q_nope_4d = ggml_reshape_4d(ctx0, Q_nope_scaled, rank, n_tokens_q, n_head, n_batch);
+        ggml_tensor * Q_rope_4d = ggml_reshape_4d(ctx0, Q_rope_scaled, n_rot, n_tokens_q, n_head, n_batch);
 
-        // NOTE: no scale tensor — use ggml_scale() which stores the scalar
-        // as an op attribute (no separate data allocation needed).
-        // ggml_new_tensor_1d in a cgraph context leaves data=NULL until
-        // graph allocation, so direct data writes crash.
+        ggml_tensor * attn_full = nullptr;
 
-        // Accumulators: [rank, n_tokens_q, n_head, n_batch]
-        ggml_tensor * acc   = nullptr;
-        ggml_tensor * l_sum = nullptr;  // [1, n_tokens_q, n_head, n_batch]
+        for (int64_t qt = 0; qt < n_q_tiles; qt++) {
+            const int64_t q_start  = qt * CHUNK_Q;
+            const int64_t q_chunk  = std::min(CHUNK_Q, n_tokens_q - q_start);
+            const int64_t q_cols_t = q_chunk * n_head * n_batch;
 
-        for (int64_t c = 0; c < n_chunks; c++) {
-            const int64_t kv_start = c * MLA_CHUNK;
-            const int64_t chunk    = std::min(MLA_CHUNK, n_tokens_kv - kv_start);
+            // --- Query tile: [rank, q_chunk, n_head, n_batch] -> 2D [rank, q_cols_t] ---
+            ggml_tensor * Q_nope_tile = ggml_view_4d(ctx0, Q_nope_4d,
+                rank, q_chunk, n_head, n_batch,
+                Q_nope_4d->nb[1], Q_nope_4d->nb[2], Q_nope_4d->nb[3],
+                (size_t)q_start * Q_nope_4d->nb[1]);
+            Q_nope_tile = ggml_cont(ctx0, Q_nope_tile);
+            Q_nope_tile = ggml_reshape_2d(ctx0, Q_nope_tile, rank, q_cols_t);
 
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: START kv_start=%lld chunk=%lld\n", il, c, kv_start, chunk);
+            ggml_tensor * Q_rope_tile = ggml_view_4d(ctx0, Q_rope_4d,
+                n_rot, q_chunk, n_head, n_batch,
+                Q_rope_4d->nb[1], Q_rope_4d->nb[2], Q_rope_4d->nb[3],
+                (size_t)q_start * Q_rope_4d->nb[1]);
+            Q_rope_tile = ggml_cont(ctx0, Q_rope_tile);
+            Q_rope_tile = ggml_reshape_2d(ctx0, Q_rope_tile, n_rot, q_cols_t);
 
-            // --- K_latent tile: [rank, chunk, 1, 1] ---
-            if (c == 0 || c == 1) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_latent ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%lld cont=%d\n",
-                il, c, K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3],
-                (long long)K_latent->nb[0],(long long)K_latent->nb[1],(long long)K_latent->nb[2],(long long)K_latent->nb[3],
-                (long long)ggml_nbytes(K_latent), ggml_is_contiguous(K_latent));
-            const size_t k_offs = (size_t)kv_start * K_latent->nb[1];
-            const size_t k_data_size = (size_t)rank * chunk * ggml_type_size(K_latent->type);
-            if (c == 0 || c == 1) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: k_offs=%lld k_data_size=%lld k_offs+k_data_size=%lld K_latent_nbytes=%lld\n",
-                il, c, (long long)k_offs, (long long)k_data_size, (long long)(k_offs + k_data_size), (long long)ggml_nbytes(K_latent));
-            ggml_tensor * K_t_view = ggml_view_4d(ctx0, K_latent,
-                rank, chunk, 1, 1,
-                K_latent->nb[1], K_latent->nb[2], K_latent->nb[3],
-                k_offs);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t_view=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n", il, c, K_t_view->ne[0],K_t_view->ne[1],K_t_view->ne[2],K_t_view->ne[3],
-                (long long)K_t_view->nb[0],(long long)K_t_view->nb[1],(long long)K_t_view->nb[2],(long long)K_t_view->nb[3]);
-            ggml_tensor * K_t = ggml_cont(ctx0, K_t_view);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: K_t=[%lld,%lld,%lld,%lld] cont=%d\n", il, c, K_t->ne[0],K_t->ne[1],K_t->ne[2],K_t->ne[3], ggml_is_contiguous(K_t));
+            if (qt == 0) LLAMA_LOG_ERROR("  [MLA-2TILE] il=%d qt=0: Q_nope_tile=[%lld,%lld] Q_rope_tile=[%lld,%lld] q_chunk=%lld\n",
+                il, Q_nope_tile->ne[0], Q_nope_tile->ne[1], Q_rope_tile->ne[0], Q_rope_tile->ne[1], q_chunk);
 
-            // --- Scores: nope part [chunk, n_tokens_q, n_head, n_batch] ---
-            // K_t: [rank, chunk, 1, 1]  ×  Q_nope: [rank, n_tq, n_h, nb]
-            // → [chunk, n_tq, n_h, nb]
-            // Avoid batch-dim broadcasting: flatten Q to 2D, do simple matmul.
-            // K_t: [rank, chunk, 1, 1] → ne0=rank (reduction), ne1=chunk (output)
-            // Q_flat: [rank, q_cols, 1, 1] → ne0=rank (reduction), ne1=q_cols (output)
-            // Result: [chunk, q_cols, 1, 1]
-            const int64_t q_cols = Q_nope_scaled->ne[1] * Q_nope_scaled->ne[2] * Q_nope_scaled->ne[3];
-            ggml_tensor * Q_flat = ggml_reshape_2d(ctx0, Q_nope_scaled, Q_nope_scaled->ne[0], q_cols);
-            ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_flat);  // [chunk, q_cols, 1, 1]
-            s = ggml_reshape_4d(ctx0, s, s->ne[0], n_tokens_q, n_head, n_batch);
-            s = ggml_cont(ctx0, s);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_nope=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
+            ggml_tensor * acc_q   = nullptr;
+            ggml_tensor * l_sum_q = nullptr;
 
-            // --- Add rope contributions (4 small matmuls) ---
-            // Kr: [n_rot, chunk, 1, nb]  ×  Q_rope: [n_rot, n_tq, n_h, nb]
-            // → [chunk, n_tq, n_h, nb]
-            // Avoid batch-dim broadcasting: flatten Q, transpose K, simple matmul.
-            const int64_t q_rope_cols = Q_rope_scaled->ne[1] * Q_rope_scaled->ne[2] * Q_rope_scaled->ne[3];
-            ggml_tensor * Q_rope_flat = ggml_reshape_2d(ctx0, Q_rope_scaled, Q_rope_scaled->ne[0], q_rope_cols);
-            for (int64_t i = 0; i < n_kv_base; i++) {
-                ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
-                    n_rot, chunk, 1, n_batch,
-                    K_rope_4d->nb[2],   // nb1 = token stride (464)
-                    K_rope_4d->nb[3],   // nb2 = batch stride
-                    0,                  // nb3
-                    (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
-                ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr, Q_rope_flat);  // [chunk, q_rope_cols, 1, nb]
-                s_rope = ggml_reshape_4d(ctx0, s_rope, s_rope->ne[0], n_tokens_q, n_head, n_batch);
-                s_rope = ggml_cont(ctx0, s_rope);
-                s = ggml_add(ctx0, s, s_rope);
+            // Causal: only KV tiles up to (and including) the one overlapping this
+            // query tile can contribute.
+            const int64_t n_kv_needed = std::min(n_kv_tiles, (q_start + q_chunk + CHUNK_KV - 1) / CHUNK_KV);
+
+            for (int64_t kt = 0; kt < n_kv_needed; kt++) {
+                const int64_t kv_start = kt * CHUNK_KV;
+                const int64_t kv_chunk = std::min(CHUNK_KV, n_tokens_kv - kv_start);
+
+                // --- K_latent tile: [rank, kv_chunk, 1, 1] ---
+                ggml_tensor * K_t = ggml_cont(ctx0, ggml_view_4d(ctx0, K_latent,
+                    rank, kv_chunk, 1, 1,
+                    K_latent->nb[1], K_latent->nb[2], K_latent->nb[3],
+                    (size_t)kv_start * K_latent->nb[1]));
+
+                // --- Scores (nope): [kv_chunk, q_cols_t] -> [kv_chunk, q_chunk, n_h, nb] ---
+                ggml_tensor * s = ggml_mul_mat(ctx0, K_t, Q_nope_tile);
+                s = ggml_reshape_4d(ctx0, s, kv_chunk, q_chunk, n_head, n_batch);
                 s = ggml_cont(ctx0, s);
-            }
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3], (int)s->type);
 
-            // --- Apply causal mask ---
-            // kq_mask: [n_tokens_q, n_tokens_kv, 1, 1] with nb=[n_kv*4, 4, ...]
-            // View: [chunk, n_tq, 1, 1] → ne0=chunk(key from dim1), ne1=n_tq(query from dim0)
-            // Strides: nb1=kq_mask->nb[0](query stride), nb2=kq_mask->nb[2], nb3=kq_mask->nb[3]
-            // Offset: kv_start * kq_mask->nb[1] (key stride = 4)
-            if (kq_mask) {
-                if (c == 0) LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: kq_mask=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
-                    il, kq_mask->ne[0],kq_mask->ne[1],kq_mask->ne[2],kq_mask->ne[3],
-                    (long long)kq_mask->nb[0],(long long)kq_mask->nb[1],(long long)kq_mask->nb[2],(long long)kq_mask->nb[3]);
-                // kq_mask: [n_kv, n_tq, 1, 1] — dim0=key(nb0=2), dim1=query(nb1=150016)
-                // View: [chunk, n_tq, 1, 1] — dim0=key chunk, dim1=query
-                // nb1 = query stride in source = kq_mask->nb[1]
-                // offset = kv_start * key stride in source = kv_start * kq_mask->nb[0]
-                ggml_tensor * mt = ggml_view_4d(ctx0, kq_mask,
-                    chunk, n_tokens_q, 1, 1,
-                    kq_mask->nb[1],   // nb1 = query stride (150016)
-                    kq_mask->nb[2],   // nb2 = dim2 stride
-                    kq_mask->nb[3],   // nb3 = dim3 stride
-                    (size_t)kv_start * kq_mask->nb[0]);  // offset = kv_start * key_stride (2)
-                mt = ggml_cont(ctx0, mt);
-                mt = ggml_cast(ctx0, mt, GGML_TYPE_F32);
-                mt = ggml_cont(ctx0, mt);
-                s = ggml_add(ctx0, s, mt);  // broadcast [chunk,n_tq,1,1] → [chunk,n_tq,n_h,nb]
+                // --- Add rope contributions (4 small matmuls) ---
+                for (int64_t i = 0; i < n_kv_base; i++) {
+                    ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
+                        n_rot, kv_chunk, 1, n_batch,
+                        K_rope_4d->nb[2],   // nb1 = token stride
+                        K_rope_4d->nb[3],   // nb2 = batch stride
+                        0,                  // nb3
+                        (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
+                    ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr, Q_rope_tile);
+                    s_rope = ggml_reshape_4d(ctx0, s_rope, kv_chunk, q_chunk, n_head, n_batch);
+                    s_rope = ggml_cont(ctx0, s_rope);
+                    s = ggml_add(ctx0, s, s_rope);
+                    s = ggml_cont(ctx0, s);
+                }
+
+                // --- Causal mask: only when this KV tile overlaps the query tile ---
+                if (kq_mask && (kv_start + kv_chunk > q_start)) {
+                    ggml_tensor * mt = ggml_view_4d(ctx0, kq_mask,
+                        kv_chunk, q_chunk, 1, 1,
+                        kq_mask->nb[1],   // nb1 = query stride
+                        kq_mask->nb[2],   // nb2
+                        kq_mask->nb[3],   // nb3
+                        (size_t)kv_start * kq_mask->nb[0] + (size_t)q_start * kq_mask->nb[1]);
+                    mt = ggml_cont(ctx0, mt);
+                    mt = ggml_cast(ctx0, mt, GGML_TYPE_F32);
+                    mt = ggml_cont(ctx0, mt);
+                    s = ggml_add(ctx0, s, mt);
+                    s = ggml_cont(ctx0, s);
+                }
+
+                s = ggml_cast(ctx0, s, GGML_TYPE_F32);
                 s = ggml_cont(ctx0, s);
-                LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: s_masked=[%lld,%lld,%lld,%lld]\n",
-                    il, c, s->ne[0],s->ne[1],s->ne[2],s->ne[3]);
+                ggml_prec_set_acc(s, GGML_PREC_F32);
+
+                ggml_tensor * e = ggml_exp(ctx0, s);
+                e = ggml_cont(ctx0, e);
+
+                if (qt == 0 && kt == 0) LLAMA_LOG_ERROR("  [MLA-2TILE] il=%d qt=0 kt=0: s=[%lld,%lld,%lld,%lld] e=[%lld,%lld,%lld,%lld] type=%d\n",
+                    il, s->ne[0],s->ne[1],s->ne[2],s->ne[3], e->ne[0],e->ne[1],e->ne[2],e->ne[3], (int)e->type);
+
+                // --- V tile: [kv_chunk, rank, 1, nb] ---
+                ggml_tensor * V_view = ggml_view_4d(ctx0, v,
+                    rank, kv_chunk, 1, n_batch,
+                    v->nb[2], v->nb[1], v->nb[3],
+                    (size_t)kv_start * v->nb[2]);
+                ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_transpose(ctx0, V_view));
+
+                // --- v_e = V_t_tile @ e -> [rank, q_cols_t] -> [rank, q_chunk, n_h, nb] ---
+                ggml_tensor * e_2d = ggml_reshape_2d(ctx0, e, e->ne[0], q_cols_t);
+                ggml_tensor * v_e = ggml_mul_mat(ctx0, V_t_tile, e_2d);
+                v_e = ggml_reshape_4d(ctx0, v_e, rank, q_chunk, n_head, n_batch);
+                v_e = ggml_cont(ctx0, v_e);
+
+                if (acc_q == nullptr) {
+                    acc_q   = v_e;
+                    l_sum_q = ggml_cont(ctx0, ggml_sum_rows(ctx0, e));
+                } else {
+                    acc_q   = ggml_cont(ctx0, ggml_add(ctx0, acc_q, v_e));
+                    l_sum_q = ggml_cont(ctx0, ggml_add(ctx0, l_sum_q, ggml_sum_rows(ctx0, e)));
+                }
             }
 
-            // --- Cast to F32 + cont ---
-            s = ggml_cast(ctx0, s, GGML_TYPE_F32);
-            s = ggml_cont(ctx0, s);
-            ggml_prec_set_acc(s, GGML_PREC_F32);
+            // --- attn_q = acc_q / l_sum_q -> [rank, q_chunk, n_h, nb] ---
+            ggml_tensor * attn_q = ggml_div(ctx0, acc_q, l_sum_q);
+            attn_q = ggml_cont(ctx0, attn_q);
 
-            // --- exp + cont ---
-            ggml_tensor * e = ggml_exp(ctx0, s);
-            e = ggml_cont(ctx0, e);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: e=[%lld,%lld,%lld,%lld] type=%d\n",
-                il, c, e->ne[0],e->ne[1],e->ne[2],e->ne[3], (int)e->type);
+            // --- v_mla projection: [head_dim, rank, n_h, nb] x [rank, q_chunk, n_h, nb]
+            //     -> [head_dim, q_chunk, n_h, nb] ---
+            ggml_tensor * attn_proj = ggml_mul_mat(ctx0, v_mla, attn_q);
+            attn_proj = ggml_cont(ctx0, attn_proj);
 
-            // --- V tile: [chunk, rank, 1, nb] ---
-            // v: [256,1,75008,1] nb=[2,512,512,38404096]
-            // View [256,chunk,1,1] from v (rank,chunk): nb1=v->nb[2](512), nb2=v->nb[1](512), nb3=v->nb[3]
-            // Then transpose → [chunk,256,1,1] + cont
-            ggml_tensor * V_view = ggml_view_4d(ctx0, v,
-                rank, chunk, 1, n_batch,
-                v->nb[2], v->nb[1], v->nb[3],
-                (size_t)kv_start * v->nb[2]);
-            ggml_tensor * V_t_tile = ggml_cont(ctx0, ggml_transpose(ctx0, V_view));
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: V_t_tile=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld]\n",
-                il, c, V_t_tile->ne[0],V_t_tile->ne[1],V_t_tile->ne[2],V_t_tile->ne[3],
-                (long long)V_t_tile->nb[0],(long long)V_t_tile->nb[1],(long long)V_t_tile->nb[2],(long long)V_t_tile->nb[3]);
+            // --- [head_dim, q_chunk, n_h, nb] -> [head_dim*n_h, q_chunk*nb] ---
+            attn_proj = ggml_permute(ctx0, attn_proj, 0, 2, 1, 3);
+            attn_proj = ggml_cont_2d(ctx0, attn_proj, attn_proj->ne[0]*attn_proj->ne[1], attn_proj->ne[2]*attn_proj->ne[3]);
 
-            // --- v_e = V_tile @ e → [rank, n_tq, n_h, nb] ---
-            // Avoid batch-dim broadcasting in ggml_mul_mat (causes OOB internal view).
-            // Flatten e: [chunk, n_tq, n_h, nb] → [chunk, n_tq*n_h*nb]
-            const int64_t e_cols = e->ne[1] * e->ne[2] * e->ne[3];
-            ggml_tensor * e_2d = ggml_reshape_2d(ctx0, e, e->ne[0], e_cols);
-            ggml_tensor * v_e = ggml_mul_mat(ctx0, V_t_tile, e_2d);
-            // Reshape back: [rank, n_tq*n_h*nb] → [rank, n_tq, n_h, nb]
-            v_e = ggml_reshape_4d(ctx0, v_e, v_e->ne[0], n_tokens_q, n_head, n_batch);
-            v_e = ggml_cont(ctx0, v_e);
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: v_e=[%lld,%lld,%lld,%lld]\n",
-                il, c, v_e->ne[0],v_e->ne[1],v_e->ne[2],v_e->ne[3]);
-
-            if (acc == nullptr) {
-                acc   = v_e;
-                l_sum = ggml_sum_rows(ctx0, e);
-                l_sum = ggml_cont(ctx0, l_sum);
+            // --- Assemble across query tiles ---
+            if (attn_full == nullptr) {
+                attn_full = attn_proj;
             } else {
-                acc   = ggml_add(ctx0, acc, v_e);
-                acc   = ggml_cont(ctx0, acc);
-                ggml_tensor * sr = ggml_sum_rows(ctx0, e);
-                sr = ggml_cont(ctx0, sr);
-                l_sum = ggml_add(ctx0, l_sum, sr);
-                l_sum = ggml_cont(ctx0, l_sum);
+                attn_full = ggml_cont_2d(ctx0, ggml_concat(ctx0, attn_full, attn_proj, 1),
+                    attn_full->ne[0], attn_full->ne[1] + attn_proj->ne[1]);
             }
-            LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d c=%lld: acc=[%lld,%lld,%lld,%lld] l_sum=[%lld,%lld,%lld,%lld] DONE\n",
-                il, c, acc->ne[0],acc->ne[1],acc->ne[2],acc->ne[3],
-                l_sum->ne[0],l_sum->ne[1],l_sum->ne[2],l_sum->ne[3]);
         }
 
-        // --- Final: attn = acc / l_sum → [rank, n_tq, n_h, nb] ---
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: acc=[%lld,%lld,%lld,%lld] l_sum=[%lld,%lld,%lld,%lld]\n",
-            il, acc->ne[0],acc->ne[1],acc->ne[2],acc->ne[3],
-            l_sum->ne[0],l_sum->ne[1],l_sum->ne[2],l_sum->ne[3]);
-        ggml_tensor * attn = ggml_div(ctx0, acc, l_sum);
-        attn = ggml_cont(ctx0, attn);
-        LLAMA_LOG_ERROR("  [MLA-CHUNKED] il=%d: attn=[%lld,%lld,%lld,%lld]\n",
-            il, attn->ne[0], attn->ne[1], attn->ne[2], attn->ne[3]);
-        cb(attn, "attn_mla_chunked", il);
-
-        // V up-projection: v_mla [head_dim, rank, n_h, nb] × attn [rank, n_tq, n_h, nb]
-        // → [head_dim, n_tq, n_h, nb]
-        LLAMA_LOG_ERROR("  v_mla: [%lld,%lld,%lld,%lld] attn: [%lld,%lld,%lld,%lld]\n",
-            v_mla->ne[0],v_mla->ne[1],v_mla->ne[2],v_mla->ne[3],
-            attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
-        attn = ggml_mul_mat(ctx0, v_mla, attn);
-        attn = ggml_cont(ctx0, attn);
-        LLAMA_LOG_ERROR("  attn_vmla: [%lld,%lld,%lld,%lld]\n",
-            attn->ne[0],attn->ne[1],attn->ne[2],attn->ne[3]);
-        cb(attn, "attn_vmla", il);
-
-        // Final: [head_dim, n_tq, n_h, nb] → permute → cont_2d
-        cur = ggml_permute(ctx0, attn, 0, 2, 1, 3);
-        cur = ggml_cont_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+        cb(attn_full, "attn_mla_chunked", il);
+        cur = attn_full;
+        LLAMA_LOG_ERROR("  [MLA-2TILE] il=%d: cur final: [%lld,%lld,%lld,%lld]\n",
+            il, cur->ne[0],cur->ne[1],cur->ne[2],cur->ne[3]);
         LLAMA_LOG_ERROR("  cur final: [%lld,%lld,%lld,%lld]\n", cur->ne[0],cur->ne[1],cur->ne[2],cur->ne[3]);
     } else {
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
