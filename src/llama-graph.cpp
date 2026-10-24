@@ -2898,10 +2898,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_tensor * Q_rope_v = ggml_view_4d(ctx0, q, n_rot, n_tokens_q, n_head, n_batch,
             q->nb[1], q->nb[2], q->nb[3], (size_t)rank * q->nb[0]);
 
-        // Flatten views to 2D for matmul: [dim, n_tq*n_h*nb]
+        // ggml_reshape_2d requires contiguous input → ggml_cont first
+        ggml_tensor * Q_nope_c = ggml_cont(ctx0, Q_nope_v);
+        ggml_tensor * Q_rope_c = ggml_cont(ctx0, Q_rope_v);
+
+        // Flatten to 2D for matmul: [dim, n_tq*n_h*nb]
         const int64_t q_cols = n_tokens_q * n_head * n_batch;
-        ggml_tensor * Q_nope_2d = ggml_reshape_2d(ctx0, Q_nope_v, rank, q_cols);
-        ggml_tensor * Q_rope_2d = ggml_reshape_2d(ctx0, Q_rope_v, n_rot, q_cols);
+        ggml_tensor * Q_nope_2d = ggml_reshape_2d(ctx0, Q_nope_c, rank, q_cols);
+        ggml_tensor * Q_rope_2d = ggml_reshape_2d(ctx0, Q_rope_c, n_rot, q_cols);
 
         // Pre-scale Q by kq_scale (on 2D tensors — no view issues)
         ggml_tensor * Q_nope_scaled = ggml_scale(ctx0, Q_nope_2d, kq_scale);
