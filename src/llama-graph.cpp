@@ -2923,8 +2923,19 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         // Make contiguous (required by ggml_mul_mat)
         ggml_tensor * K_latent = ggml_cont(ctx0, K_latent_raw);
-        LLAMA_LOG_ERROR("  K_latent: [%lld,%lld,%lld,%lld] cont=%d\n",
-            K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3], ggml_is_contiguous(K_latent));
+        ggml_tensor * K_rope_c = ggml_cont(ctx0, K_rope_raw);
+
+        // K_rope 4D view: [n_rot, n_kv_base, n_tokens_kv, n_batch]
+        ggml_tensor * K_rope_4d = ggml_view_4d(ctx0, K_rope_c,
+            n_rot, n_kv_base, n_tokens_kv, n_batch,
+            (size_t)n_rot * K_rope_c->nb[0],   // nb1 = group stride
+            K_rope_c->nb[1],                   // nb2 = token stride
+            K_rope_c->nb[2],                   // nb3 = batch stride
+            0);
+
+        LLAMA_LOG_ERROR("  K_latent: [%lld,%lld,%lld,%lld] K_rope_4d: [%lld,%lld,%lld,%lld]\n",
+            K_latent->ne[0],K_latent->ne[1],K_latent->ne[2],K_latent->ne[3],
+            K_rope_4d->ne[0],K_rope_4d->ne[1],K_rope_4d->ne[2],K_rope_4d->ne[3]);
 
         // === CHUNKED MLA ATTENTION (exp-accumulation, no full score matrix) ===
         // Replaces the O(n_kv * n_qh) full-matrix approach with O(CHUNK * n_qh) tiles.
