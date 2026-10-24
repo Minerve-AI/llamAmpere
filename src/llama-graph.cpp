@@ -2889,32 +2889,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             (int)ggml_is_contiguous(q), (long long)ggml_nbytes(q));
 
         // Split Q: [rank+n_rot, n_tokens_q, n_head, n_batch]
-        // ggml_view_4d(ctx, a, ne0,ne1,ne2,ne3, nb1, nb2, nb3, offset)
-        // nb1/2/3 = strides for dims 1/2/3 of SOURCE (not 0/1/2!)
-        ggml_tensor * Q_nope = ggml_view_4d(ctx0, q, rank, n_tokens_q, n_head, n_batch,
+        // Q is [314, n_tq, n_h, nb] contiguous f32 after ggml_cont.
+        // Use ggml_view_4d — the views ARE within bounds (verified).
+        // Do NOT call ggml_cont on the views — it creates OOB internal views.
+        // Instead, flatten to 2D for the matmul (avoids batch-dim broadcasting).
+        ggml_tensor * Q_nope_v = ggml_view_4d(ctx0, q, rank, n_tokens_q, n_head, n_batch,
             q->nb[1], q->nb[2], q->nb[3], 0);
-        ggml_tensor * Q_rope = ggml_view_4d(ctx0, q, n_rot, n_tokens_q, n_head, n_batch,
+        ggml_tensor * Q_rope_v = ggml_view_4d(ctx0, q, n_rot, n_tokens_q, n_head, n_batch,
             q->nb[1], q->nb[2], q->nb[3], (size_t)rank * q->nb[0]);
-        LLAMA_LOG_ERROR("  Q_nope: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] off=0\n",
-            Q_nope->ne[0],Q_nope->ne[1],Q_nope->ne[2],Q_nope->ne[3],
-            (long long)Q_nope->nb[0],(long long)Q_nope->nb[1],(long long)Q_nope->nb[2],(long long)Q_nope->nb[3]);
-        LLAMA_LOG_ERROR("  Q_rope: [%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] off=%lld\n",
-            Q_rope->ne[0],Q_rope->ne[1],Q_rope->ne[2],Q_rope->ne[3],
-            (long long)Q_rope->nb[0],(long long)Q_rope->nb[1],(long long)Q_rope->nb[2],(long long)Q_rope->nb[3],
-            (long long)(rank * q->nb[0]));
 
-        // Keep Q as [dim, n_tokens_q, n_head, n_batch] — NOT flattened.
-        // This produces score [chunk, n_tokens_q, n_head, 1] which supports
-        // causal mask broadcasting (mask [chunk, n_tokens_q, 1, 1] → broadcast over heads).
-        // vllm reference: score is per-head [H, S], mask is [1, Sq, Skv] broadcast.
-        ggml_tensor * Q_nope_c = ggml_cont(ctx0, Q_nope);   // [rank, n_tokens_q, n_head, n_batch]
-        ggml_tensor * Q_rope_c = ggml_cont(ctx0, Q_rope);   // [n_rot, n_tokens_q, n_head, n_batch]
-        // Pre-scale Q by kq_scale
-        ggml_tensor * Q_nope_scaled = ggml_scale(ctx0, Q_nope_c, kq_scale);
-        ggml_tensor * Q_rope_scaled = ggml_scale(ctx0, Q_rope_c, kq_scale);
-        LLAMA_LOG_ERROR("  Q_nope: [%lld,%lld,%lld,%lld] Q_rope: [%lld,%lld,%lld,%lld] kq_scale=%.6f\n",
-            Q_nope_c->ne[0],Q_nope_c->ne[1],Q_nope_c->ne[2],Q_nope_c->ne[3],
-            Q_rope_c->ne[0],Q_rope_c->ne[1],Q_rope_c->ne[2],Q_rope_c->ne[3], kq_scale);
+        // Flatten views to 2D for matmul: [dim, n_tq*n_h*nb]
+        const int64_t q_cols = n_tokens_q * n_head * n_batch;
+        ggml_tensor * Q_nope_2d = ggml_reshape_2d(ctx0, Q_nope_v, rank, q_cols);
+        ggml_tensor * Q_rope_2d = ggml_reshape_2d(ctx0, Q_rope_v, n_rot, q_cols);
+
+        // Pre-scale Q by kq_scale (on 2D tensors — no view issues)
+        ggml_tensor * Q_nope_scaled = ggml_scale(ctx0, Q_nope_2d, kq_scale);
+        ggml_tensor * Q_rope_scaled = ggml_scale(ctx0, Q_rope_2d, kq_scale);
+        LLAMA_LOG_ERROR("  Q_nope_2d: [%lld,%lld] Q_rope_2d: [%lld,%lld] kq_scale=%.6f\n",
+            Q_nope_2d->ne[0],Q_nope_2d->ne[1],
+            Q_rope_2d->ne[0],Q_rope_2d->ne[1], kq_scale);
 
         // Split K: [rank+n_rot*n_kv_base, n_tokens_kv, 1, n_batch]
         // k: [488,75008,1,1] after permute → nb=[2,976,976,73207808]
