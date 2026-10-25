@@ -475,17 +475,79 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         cb(k_rope, "k_rope_rope", il);
 
         //
-        // 5. Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, n_tokens]
-        //    The KV cache stores this packed tensor (MQA, single "head")
+        // 4b. Per-head key RMS for MLA attention (computed from RAW weights).
+        //     rms[h,t] = sqrt(( sum_p k_nope_raw[p,h,t]^2 + sum_d k_rope_raw[d, h/n_hpg, t]^2 ) / head_dim + eps)
+        //     where k_nope_raw = wk_b_raw @ latent (per-head, unscaled) and k_rope_raw is the
+        //     rope key BEFORE the (1+w) k-norm scaling and RoPE.  The result is appended to the
+        //     packed K cache so the double-tile attention in llama-graph.cpp can divide the
+        //     scores by it (per (token, head)).
         //
-        // Reshape latent to 3D: [rank, 1, n_tokens]
+        ggml_tensor * rms_2d = nullptr;
+        if (layer.wk_b_raw) {
+            // k_nope_raw: [qk_nope, n_tokens, n_head]
+            //   wk_b_raw: [rank, qk_nope*n_head] → [rank, qk_nope, n_head] → permute [qk_nope, rank, n_head]
+            ggml_tensor * wk_b_raw_3d = ggml_reshape_3d(ctx0, layer.wk_b_raw, rank, qk_nope, n_head);
+            ggml_tensor * wk_b_raw_t  = ggml_permute(ctx0, wk_b_raw_3d, 1, 0, 2, 3); // [qk_nope, rank, n_head]
+            if (wk_b_raw_t->type != latent->type) wk_b_raw_t = ggml_cast(ctx0, wk_b_raw_t, latent->type);
+            ggml_tensor * k_nope_raw = ggml_mul_mat(ctx0, wk_b_raw_t, latent); // [qk_nope, n_tokens, n_head]
+
+            // k_nope_sum: [1, n_tokens, n_head] = sum over the qk_nope dim of k_nope_raw^2
+            ggml_tensor * k_nope_sum = ggml_sum_rows(ctx0, ggml_sqr(ctx0, k_nope_raw));
+
+            // k_rope_raw: the rope key BEFORE (1+w) scaling and RoPE: [n_rot, n_kv_base, n_tokens]
+            ggml_tensor * kr_raw_3d = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
+            // kr_sum: [1, n_kv_base, n_tokens] = sum over the n_rot dim of kr_raw^2
+            ggml_tensor * kr_sum = ggml_sum_rows(ctx0, ggml_sqr(ctx0, kr_raw_3d));
+
+            // kr_sum is [1, n_kv_base, n_tokens] but head h uses group h / n_heads_per_group
+            // (a block-repeat, not the tiling that ggml_repeat would do).  Build a constant
+            // index tensor [n_head] = {h / n_heads_per_group} and gather the rows.
+            const int64_t n_heads_per_group = n_head / n_kv_base;
+            ggml_tensor * kr_idx = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_head);
+            ggml_set_input(kr_idx);
+            {
+                int32_t * kr_idx_data = (int32_t *) kr_idx->data;
+                for (int64_t h = 0; h < n_head; ++h) kr_idx_data[h] = (int32_t) (h / n_heads_per_group);
+            }
+            ggml_tensor * kr_sum_rep = ggml_get_rows(ctx0, kr_sum, kr_idx); // [1, n_head, n_tokens]
+
+            // sumsq: [1, n_head, n_tokens] = k_nope_sum + kr_sum_rep
+            ggml_tensor * sumsq = ggml_add(ctx0, k_nope_sum, kr_sum_rep);
+
+            // rms = sqrt(sumsq / head_dim + eps)  (eps = RMS-norm epsilon)
+            ggml_tensor * rms = ggml_scale(ctx0, sumsq, 1.0f / float(head_dim));
+            rms = ggml_add(ctx0, rms, ggml_view_1d(ctx0, ggml_new_f32(ctx0, hparams.f_norm_rms_eps), 1, 0));
+            rms = ggml_sqrt(ctx0, rms);
+            // [1, n_head, n_tokens] → [n_head, n_tokens] → contiguous
+            rms = ggml_reshape_2d(ctx0, rms, n_head, n_tokens);
+            rms_2d = ggml_cont(ctx0, rms);
+            cb(rms_2d, "k_rms", il);
+        } else {
+            LLAMA_LOG_WARN("[MLA] il=%d: wk_b_raw missing - skipping per-head key RMS (scores will NOT be RMS-normalized)\n", il);
+        }
+
+        //
+        // 5. Pack K cache: [latent | k_rope | k_rms] → [rank + n_rot*n_kv_base + n_head, 1, n_tokens]
+        //    The KV cache stores this packed tensor (MQA, single "head").  The trailing n_head
+        //    rows hold the per-head key RMS (see step 4b); the attention in llama-graph.cpp reads
+        //    them back and divides the scores by them.
+        //
+        // Reshape latent to 2D: [rank, n_tokens]
         ggml_tensor * latent_2d = ggml_reshape_2d(ctx0, latent, rank, n_tokens);
         // Reshape k_rope to 2D: [n_rot*n_kv_base, n_tokens]
         ggml_tensor * k_rope_2d_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
         // Concatenate: [rank + n_rot*n_kv_base, n_tokens]
         ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_2d, k_rope_2d_packed, 0);
-        // Reshape to [rank + n_rot*n_kv_base, 1, n_tokens] for KV cache
-        ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
+        // Append the per-head key RMS: [rank + n_rot*n_kv_base + n_head, n_tokens]
+        if (rms_2d) {
+            // rms_2d is F32 (from sqrt); cast to the K-cache type so ggml_concat types match
+            if (rms_2d->type != K_packed_2d->type) {
+                rms_2d = ggml_cast(ctx0, rms_2d, K_packed_2d->type);
+            }
+            K_packed_2d = ggml_concat(ctx0, K_packed_2d, rms_2d, 0);
+        }
+        // Reshape to [rank + n_rot*n_kv_base + n_head, 1, n_tokens] for KV cache
+        ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base + (rms_2d ? n_head : 0), 1, n_tokens);
         cb(K_packed, "K_packed", il);
 
         //
@@ -510,7 +572,7 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
 
         ggml_tensor * attn_raw = build_attn(inp,
                     nullptr, nullptr, nullptr,
-                    Q_full, K_packed, V_latent, nullptr, nullptr, wv_b_3d, kq_scale, il);
+                    Q_full, K_packed, V_latent, nullptr, nullptr, wv_b_3d, layer.wk_b_raw, kq_scale, il);
         cb(attn_raw, "attn_raw", il);
         LLAMA_LOG_ERROR("[MLA-DBG] il=%d attn_raw: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s op=%d cont=%d transposed=%d\n",
             il, attn_raw->ne[0],attn_raw->ne[1],attn_raw->ne[2],attn_raw->ne[3],
@@ -922,7 +984,7 @@ llama_model_qwen35mla::graph_mtp::graph_mtp(const llama_model & model, const llm
             const int64_t n_kv = kq_mask->ne[0];
             ggml_tensor * mask_b = ggml_view_2d(ctx0, kq_mask, n_kv, width, kq_mask->nb[1], (size_t) row0*kq_mask->nb[1]);
 
-            cur_b = build_attn_mha(Q_b, k_view, v_view, nullptr, mask_b, nullptr, nullptr, 0, kq_scale, il);
+            cur_b = build_attn_mha(Q_b, k_view, v_view, nullptr, mask_b, nullptr, nullptr, nullptr, 0, kq_scale, il);
             cur_b = build_lora_mm(layer.wo, cur_b, layer.wo_s);
             cur_b = ggml_add(ctx0, cur_b, inpSA_b);
 

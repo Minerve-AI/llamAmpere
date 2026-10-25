@@ -1623,11 +1623,16 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     const uint32_t head_k_eff = (k_is_turbo && head_k % 128 != 0)
         ? ((head_k + 127) / 128) * 128 : head_k;
 
+    // MLA: the packed K row also carries the per-head key RMS in its trailing n_head
+    // rows (see qwen35mla.cpp).  Return the full row so the double-tile attention in
+    // llama-graph.cpp can read the RMS back and divide the scores by it.
+    const uint32_t head_k_out = use_mla ? (uint32_t) n_embd_k_gqa : head_k_eff;
+
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
     return ggml_view_4d(ctx, k,
-            head_k_eff, hparams.n_head_kv(il), n_kv, ns,
-            ggml_row_size(k->type, head_k_eff),
+            head_k_out, hparams.n_head_kv(il), n_kv, ns,
+            ggml_row_size(k->type, head_k_out),
             ggml_row_size(k->type, n_embd_k_gqa),
             ggml_row_size(k->type, n_embd_k_gqa*kv_size),
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
