@@ -400,6 +400,21 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     cb(q_nope, "q_nope", il);
 
     //
+    // 2b. Apply the (1+w) k-norm factor to q_nope (nope slice) before absorption.
+    //     w = 1 + attn_k_norm  ([head_dim]);  w_nope = w[n_rot .. head_dim]  ([qk_nope])
+    //     q_nope: [qk_nope, n_head, n_tokens];  broadcast over the head/token dims.
+    //
+    {
+        // q_nope * (1+w) = q_nope + q_nope*w
+        ggml_tensor * w_nope = ggml_cont(ctx0, ggml_view_1d(ctx0, layer.attn_k_norm, qk_nope, (size_t)n_rot * ggml_element_size(layer.attn_k_norm)));
+        if (w_nope->type != q_nope->type) {
+            w_nope = ggml_cast(ctx0, w_nope, q_nope->type);
+        }
+        q_nope = ggml_add(ctx0, q_nope, ggml_mul(ctx0, q_nope, w_nope));
+        cb(q_nope, "q_nope_knorm", il);
+    }
+
+    //
     // 3. Q absorption: Q_absorbed[d,h,t] = sum_p W_UK[h][d,p] * q_nope[p,h,t]
     //    wk_b GGUF: [rank, N*P] where W[d, h*P+p] = W_UK[h][d,p]
     //    Result: [rank, n_head, n_tokens]
@@ -432,6 +447,19 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
 
         ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
         cb(k_rope, "k_rope_raw", il);
+
+        // Apply the (1+w) k-norm factor to k_rope (rope slice) before RoPE.
+        // w = 1 + attn_k_norm  ([head_dim]);  w_rope = w[0 .. n_rot]  ([n_rot])
+        // k_rope: [n_rot, n_kv_base, n_tokens];  broadcast over the kv/tok dims.
+        {
+            // k_rope * (1+w) = k_rope + k_rope*w
+            ggml_tensor * w_rope = ggml_cont(ctx0, ggml_view_1d(ctx0, layer.attn_k_norm, n_rot, 0));
+            if (w_rope->type != k_rope->type) {
+                w_rope = ggml_cast(ctx0, w_rope, k_rope->type);
+            }
+            k_rope = ggml_add(ctx0, k_rope, ggml_mul(ctx0, k_rope, w_rope));
+            cb(k_rope, "k_rope_knorm", il);
+        }
 
         // Apply RoPE to q_pe and k_rope
         q_pe = ggml_rope_multi(

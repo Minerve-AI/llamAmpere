@@ -3056,18 +3056,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_add(ctx0, s, s_rope_full);
                 s = ggml_cont(ctx0, s);
 
-                // --- RMS normalization of the score by the per-KV-token latent RMS ---
-                // K_t is the K_latent tile [rank, kv_chunk, 1, 1].
-                // rms = sqrt(sum(K_t^2, dim=0) / rank) -> [1, kv_chunk, 1, 1]
-                ggml_tensor * K_t_f32 = ggml_cast(ctx0, K_t, GGML_TYPE_F32);
-                ggml_tensor * K_sq   = ggml_sqr(ctx0, K_t_f32);        // [rank, kv_chunk, 1, 1] f32
-                ggml_tensor * K_mean = ggml_sum_rows(ctx0, K_sq);      // [1, kv_chunk, 1, 1] f32
-                K_mean = ggml_scale(ctx0, K_mean, 1.0f / (float)rank); // [1, kv_chunk, 1, 1]
-                ggml_tensor * K_rms  = ggml_sqrt(ctx0, K_mean);        // [1, kv_chunk, 1, 1]
-                K_rms = ggml_transpose(ctx0, K_rms);                   // [kv_chunk, 1, 1, 1]
-                K_rms = ggml_cont(ctx0, K_rms);
-                s = ggml_div(ctx0, s, K_rms);                          // broadcast [kv_chunk, 1, 1, 1]
-                s = ggml_cont(ctx0, s);
+                // NOTE: the per-(token,head) key RMS is NOT applied here. It must be
+                // computed over the full (nope+rope) key per (token, head), which requires
+                // tensors not available in the attention computation (see qwen35mla.cpp).
+                // The previous latent-only RMS (wrong divisor / wrong reduction) was removed.
 
                 // --- Causal mask: only when this KV tile overlaps the query tile ---
                 if (kq_mask && (kv_start + kv_chunk > q_start)) {
