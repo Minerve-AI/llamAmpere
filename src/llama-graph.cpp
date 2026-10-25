@@ -2967,6 +2967,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_tensor * Q_nope_4d = ggml_reshape_4d(ctx0, Q_nope_scaled, rank, n_tokens_q, n_head, n_batch);
         ggml_tensor * Q_rope_4d = ggml_reshape_4d(ctx0, Q_rope_scaled, n_rot, n_tokens_q, n_head, n_batch);
 
+        // Query heads per KV-head group (e.g. 24 / 4 = 6).  Query head h belongs
+        // to group h / n_heads_per_group and must only use that group's K_rope.
+        const int64_t n_heads_per_group = n_head / n_kv_base;
+
         ggml_tensor * attn_full = nullptr;
 
         for (int64_t qt = 0; qt < n_q_tiles; qt++) {
@@ -3014,20 +3018,55 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_reshape_4d(ctx0, s, kv_chunk, q_chunk, n_head, n_batch);
                 s = ggml_cont(ctx0, s);
 
-                // --- Add rope contributions (4 small matmuls) ---
-                for (int64_t i = 0; i < n_kv_base; i++) {
+                // --- Add rope contributions (per-group matmuls + concat) ---
+                // BUGFIX: query head h must only use KV-head group h / n_heads_per_group.
+                // For each group g, matmul its K_rope against only the query heads
+                // in that group, then concat the results along the head dim (dim 2).
+                ggml_tensor * s_rope_full = nullptr;
+                for (int64_t g = 0; g < n_kv_base; g++) {
+                    // K_rope for group g: [n_rot, kv_chunk, 1, n_batch]
                     ggml_tensor * Kr = ggml_cont(ctx0, ggml_view_4d(ctx0, K_rope_4d,
                         n_rot, kv_chunk, 1, n_batch,
                         K_rope_4d->nb[2],   // nb1 = token stride
                         K_rope_4d->nb[3],   // nb2 = batch stride
                         0,                  // nb3
-                        (size_t)i * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
-                    ggml_tensor * s_rope = ggml_mul_mat(ctx0, Kr, Q_rope_tile);
-                    s_rope = ggml_reshape_4d(ctx0, s_rope, kv_chunk, q_chunk, n_head, n_batch);
-                    s_rope = ggml_cont(ctx0, s_rope);
-                    s = ggml_add(ctx0, s, s_rope);
-                    s = ggml_cont(ctx0, s);
+                        (size_t)g * K_rope_4d->nb[1] + (size_t)kv_start * K_rope_4d->nb[2]));
+
+                    // Q_rope for group g: only heads g*n_heads_per_group .. (g+1)*n_heads_per_group-1.
+                    // Q_rope_4d (defined before the qt loop): [n_rot, n_tokens_q, n_head, n_batch]
+                    ggml_tensor * Qr_g = ggml_view_4d(ctx0, Q_rope_4d,
+                        n_rot, q_chunk, n_heads_per_group, n_batch,
+                        Q_rope_4d->nb[1], Q_rope_4d->nb[2], Q_rope_4d->nb[3],
+                        (size_t)q_start * Q_rope_4d->nb[1] + (size_t)(g * n_heads_per_group) * Q_rope_4d->nb[2]);
+                    ggml_tensor * Qr_g_2d = ggml_reshape_2d(ctx0, ggml_cont(ctx0, Qr_g),
+                        n_rot, n_heads_per_group * q_chunk * n_batch);
+
+                    // s_rope_g: [kv_chunk, n_heads_per_group*q_chunk*nb] -> [kv_chunk, q_chunk, n_heads_per_group, nb]
+                    ggml_tensor * s_rope_g = ggml_mul_mat(ctx0, Kr, Qr_g_2d);
+                    s_rope_g = ggml_reshape_4d(ctx0, s_rope_g, kv_chunk, q_chunk, n_heads_per_group, n_batch);
+                    s_rope_g = ggml_cont(ctx0, s_rope_g);
+
+                    // Concat along head dim (dim 2)
+                    if (s_rope_full == nullptr) {
+                        s_rope_full = s_rope_g;
+                    } else {
+                        s_rope_full = ggml_cont(ctx0, ggml_concat(ctx0, s_rope_full, s_rope_g, 2));
+                    }
                 }
+                s = ggml_add(ctx0, s, s_rope_full);
+                s = ggml_cont(ctx0, s);
+
+                // --- RMS normalization of the score by the per-KV-token latent RMS ---
+                // K_t is the K_latent tile [rank, kv_chunk, 1, 1].
+                // rms = sqrt(sum(K_t^2, dim=0) / rank) -> [1, kv_chunk, 1, 1]
+                ggml_tensor * K_sq   = ggml_sqr(ctx0, K_t);            // [rank, kv_chunk, 1, 1]
+                ggml_tensor * K_mean = ggml_sum_rows(ctx0, K_sq);      // [1, kv_chunk, 1, 1]
+                K_mean = ggml_scale(ctx0, K_mean, 1.0f / (float)rank); // [1, kv_chunk, 1, 1]
+                ggml_tensor * K_rms  = ggml_sqrt(ctx0, K_mean);        // [1, kv_chunk, 1, 1]
+                K_rms = ggml_transpose(ctx0, K_rms);                   // [kv_chunk, 1, 1, 1]
+                K_rms = ggml_cont(ctx0, K_rms);
+                s = ggml_div(ctx0, s, K_rms);                          // broadcast [kv_chunk, 1, 1, 1]
+                s = ggml_cont(ctx0, s);
 
                 // --- Causal mask: only when this KV tile overlaps the query tile ---
                 if (kq_mask && (kv_start + kv_chunk > q_start)) {
