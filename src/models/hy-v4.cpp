@@ -324,7 +324,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_attention(
     // MLA-as-MQA; wo applied manually below so the gated-MLA gate can sit before o_proj
     ggml_tensor * attn = build_attn(inp_attn,
             nullptr, nullptr, nullptr,
-            Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, layer.wv_b, kq_scale, il);
+            Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, layer.wv_b, nullptr, kq_scale, il);
     cb(attn, "attn_kqv", il); // [n_head * n_embd_head_v, n_tokens]
 
     // gated MLA: elementwise sigmoid gate on the decompressed attention output
@@ -480,7 +480,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_attention_dsa(
 
     ggml_tensor * attn = build_attn(inp_attn_dsa,
             nullptr, nullptr, nullptr,
-            Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, layer.wv_b, *last_top_k, kq_scale, il);
+            Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, layer.wv_b, *last_top_k, nullptr, kq_scale, il);
     cb(attn, "attn_kqv", il);
 
     ggml_tensor * gate = ggml_mul_mat(ctx0, layer.wqkv_gate, cur);

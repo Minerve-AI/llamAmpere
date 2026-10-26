@@ -531,7 +531,7 @@ ggml_tensor * llama_model_kimi_k3::graph::build_mla_layer(
         ggml_tensor * V = kv_cmpr_3d;
 
         // wo == NULL: the output projection is applied after the gate below
-        out = build_attn(inp_attn_k, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, layer.wv_b, kq_scale, il);
+        out = build_attn(inp_attn_k, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, layer.wv_b, nullptr, kq_scale, il);
     } else {
         ggml_tensor * Q = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k_mla, n_head, n_tokens);
         ggml_tensor * kv = ggml_mul_mat(ctx0, layer.wkv_b, kv_cmpr);
@@ -546,7 +546,7 @@ ggml_tensor * llama_model_kimi_k3::graph::build_mla_layer(
         ggml_tensor * k_pe_t = ggml_new_tensor_3d(ctx0, k_pe->type, n_embd_head_qk_rope, n_head, n_tokens);
         ggml_tensor * K = ggml_concat(ctx0, ggml_repeat(ctx0, k_pe, k_pe_t), k_nope, 0);
 
-        out = build_attn(inp_attn_kv, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, nullptr, kq_scale, il);
+        out = build_attn(inp_attn_kv, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, nullptr, nullptr, kq_scale, il);
     }
 
     // K3: attn_output *= sigmoid(g_proj(x)), then o_proj

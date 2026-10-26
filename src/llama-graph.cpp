@@ -3552,6 +3552,22 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * kq_b,
         ggml_tensor * sinks,
         ggml_tensor * v_mla,
+            float     kq_scale,
+            int       il) const {
+    return build_attn(inp, wo, wo_b, wo_s, q_cur, k_cur, v_cur, kq_b, sinks, v_mla, nullptr, kq_scale, il);
+}
+
+ggml_tensor * llm_graph_context::build_attn(
+        llm_graph_input_attn_k * inp,
+        ggml_tensor * wo,
+        ggml_tensor * wo_b,
+        ggml_tensor * wo_s,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+        ggml_tensor * kq_b,
+        ggml_tensor * sinks,
+        ggml_tensor * v_mla,
         ggml_tensor * wk_b_raw,
             float     kq_scale,
             int       il) const {
