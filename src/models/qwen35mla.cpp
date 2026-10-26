@@ -491,9 +491,10 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         // where k_nope_raw = wk_b_raw @ latent and kr_raw is the raw rope key (pre-scaling).
         // The KV cache row already reserves +n_head for this tail (see llama-kv-cache.cpp).
         ggml_tensor * k_rms = nullptr;
-        if (layer.wk_b_raw) {
+        if (layer.wk_b) {
             // k_nope_raw: [qk_nope, n_head, n_tokens] (raw up-projection, no (1+w_nope))
-            ggml_tensor * k_nope_raw = ggml_mul_mat(ctx0, layer.wk_b_raw, latent);
+            // wk_b IS the raw up-projection (conversion maps .k_up_proj.weight verbatim)
+            ggml_tensor * k_nope_raw = ggml_mul_mat(ctx0, layer.wk_b, latent);
             k_nope_raw = ggml_reshape_3d(ctx0, k_nope_raw, qk_nope, n_head, n_tokens);
             cb(k_nope_raw, "k_nope_raw", il);
             // sum of squares over the nope dims -> [1, n_head, n_tokens]
@@ -516,7 +517,7 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             k_rms = ggml_reshape_2d(ctx0, k_rms, n_head, n_tokens); // [n_head, n_tokens]
             cb(k_rms, "k_rms", il);
         } else {
-            LLAMA_LOG_WARN("[MLA] il=%d: wk_b_raw missing, skipping per-head RMS (absorbed logits unrescaled)\n", il);
+            LLAMA_LOG_WARN("[MLA] il=%d: wk_b missing, skipping per-head RMS (absorbed logits unrescaled)\n", il);
         }
 
         // Reshape latent to 2D: [rank, n_tokens]
