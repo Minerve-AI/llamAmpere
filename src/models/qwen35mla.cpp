@@ -505,6 +505,7 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             const int64_t n_heads_per_group = n_head / n_kv_base;
             ggml_tensor * rope_sq_4d = ggml_reshape_4d(ctx0, rope_sq, 1, n_kv_base, 1, n_tokens);
             ggml_tensor * rope_sq_h = ggml_repeat_4d(ctx0, rope_sq_4d, 1, n_kv_base, n_heads_per_group, n_tokens);
+            rope_sq_h = ggml_cont(ctx0, rope_sq_h);
             rope_sq_h = ggml_reshape_3d(ctx0, rope_sq_h, 1, n_head, n_tokens); // [1, n_head, n_tokens]
             // combine: [1, n_head, n_tokens]
             ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_h);
