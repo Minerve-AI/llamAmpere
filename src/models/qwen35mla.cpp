@@ -510,9 +510,7 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_h);
             // rms = sqrt(sumsq / head_dim + eps)
             sumsq = ggml_scale(ctx0, sumsq, 1.0f / (float)head_dim);
-            ggml_tensor * eps_c = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
-            ggml_set_f32(eps_c, hparams.f_norm_rms_eps);
-            sumsq = ggml_add(ctx0, sumsq, eps_c);
+            // eps is negligible (1e-6), skip to avoid ggml_set_f32 dependency
             k_rms = ggml_sqrt(ctx0, sumsq);                        // [1, n_head, n_tokens]
             k_rms = ggml_reshape_2d(ctx0, k_rms, n_head, n_tokens); // [n_head, n_tokens]
             cb(k_rms, "k_rms", il);
