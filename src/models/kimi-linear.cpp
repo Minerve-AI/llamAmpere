@@ -448,7 +448,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                 ggml_tensor * Vcur = kv_cmpr;
                 cb(Vcur, "Vcur", il);
 
-                cur = build_attn(inp_attn_k, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, nullptr, kq_scale_mla, il);
+                cur = build_attn(inp_attn_k, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, kq_scale_mla, il);
                 cb(cur, "mla_out", il);
             } else { // MLA KV cache disabled. Fall back to MHA KV cache.
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k_mla, n_head, n_tokens);
@@ -479,7 +479,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
 
                 // Direct softmax attention (with MHA KV cache)
                 // Use build_attn with inp_attn for proper mask handling
-                cur = build_attn(inp_attn_kv, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, nullptr, kq_scale_mla, il);
+                cur = build_attn(inp_attn_kv, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il);
                 cb(cur, "mla_out", il);
             }
         }
