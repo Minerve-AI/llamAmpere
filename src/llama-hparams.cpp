@@ -166,7 +166,7 @@ uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
         const uint32_t rope_dim = mla_qk_rope_head_dim > 0 ? mla_qk_rope_head_dim : n_rot();
         // n_kv_base = original KV heads before MQA compression (4 for Qwen35MLA)
         const uint32_t n_kv_base = 4;
-        head_k = rank + rope_dim * n_kv_base;
+        head_k = rank + rope_dim * n_kv_base + n_head(il); // + n_head for per-head RMS
     } else {
         head_k = n_embd_head_k(il);
     }

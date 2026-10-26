@@ -1619,7 +1619,7 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     // Use padded head_dim for turbo types so the full padded data is returned
     // MTP layers (il >= n_layer) use standard GQA, not MLA
     const bool use_mla = hparams.is_mla() && il < hparams.n_layer();
-    const uint32_t head_k = use_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4) : hparams.n_embd_head_k(il);
+    const uint32_t head_k = use_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4 + hparams.n_head(il)) : hparams.n_embd_head_k(il);
     const uint32_t head_k_eff = (k_is_turbo && head_k % 128 != 0)
         ? ((head_k + 127) / 128) * 128 : head_k;
 

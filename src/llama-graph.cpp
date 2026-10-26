@@ -3056,18 +3056,25 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_add(ctx0, s, s_rope_full);
                 s = ggml_cont(ctx0, s);
 
-                // --- RMS normalization of the score by the per-KV-token latent RMS ---
-                // K_t is the K_latent tile [rank, kv_chunk, 1, 1].
-                // rms = sqrt(sum(K_t^2, dim=0) / rank) -> [1, kv_chunk, 1, 1]
-                ggml_tensor * K_t_f32 = ggml_cast(ctx0, K_t, GGML_TYPE_F32);
-                ggml_tensor * K_sq   = ggml_sqr(ctx0, K_t_f32);        // [rank, kv_chunk, 1, 1] f32
-                ggml_tensor * K_mean = ggml_sum_rows(ctx0, K_sq);      // [1, kv_chunk, 1, 1] f32
-                K_mean = ggml_scale(ctx0, K_mean, 1.0f / (float)rank); // [1, kv_chunk, 1, 1]
-                ggml_tensor * K_rms  = ggml_sqrt(ctx0, K_mean);        // [1, kv_chunk, 1, 1]
-                K_rms = ggml_transpose(ctx0, K_rms);                   // [kv_chunk, 1, 1, 1]
-                K_rms = ggml_cont(ctx0, K_rms);
-                s = ggml_div(ctx0, s, K_rms);                          // broadcast [kv_chunk, 1, 1, 1]
+                // Read per-head RMS from KV cache tail
+                // K tensor: [head_k, n_tokens_kv, 1, n_batch] where head_k = rank + n_rot*4 + n_head
+                // RMS is at offset (rank + n_rot*4), shape [n_head, n_tokens_kv]
+                const int64_t rms_offset = rank + n_rot * n_kv_base;
+                ggml_tensor * rms_full = ggml_view_1d(ctx0, k, n_head * n_tokens_kv, (size_t)rms_offset * k->nb[0]);
+                // Reshape to [n_head, n_tokens_kv]
+                rms_full = ggml_reshape_2d(ctx0, rms_full, n_head, n_tokens_kv);
+                // Transpose to [n_tokens_kv, n_head]
+                rms_full = ggml_transpose(ctx0, rms_full);
+                // Per KV tile: view [kv_chunk, n_head] at offset kv_start
+                ggml_tensor * rms_tile = ggml_view_2d(ctx0, rms_full, kv_chunk, n_head, rms_full->nb[1], (size_t)kv_start * rms_full->nb[1]);
+                rms_tile = ggml_cont(ctx0, rms_tile); // contiguous (required by ggml_reshape_4d)
+                // Reshape to [kv_chunk, 1, n_head, 1] for broadcasting
+                rms_tile = ggml_reshape_4d(ctx0, rms_tile, kv_chunk, 1, n_head, 1);
+                rms_tile = ggml_cont(ctx0, rms_tile);
+                // Divide scores by RMS
+                s = ggml_div(ctx0, s, rms_tile);
                 s = ggml_cont(ctx0, s);
+                LLAMA_LOG_ERROR("[MLA-2TILE] il=%d: RMS applied\n", il);
 
                 // --- Causal mask: only when this KV tile overlaps the query tile ---
                 if (kq_mask && (kv_start + kv_chunk > q_start)) {

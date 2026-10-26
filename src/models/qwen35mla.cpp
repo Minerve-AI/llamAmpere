@@ -382,7 +382,13 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     cb(gate, "gate", il);
 
     // Q normalization (per-head RMS over full head_dim)
-    Qcur = build_norm(Qcur, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
+    // GemmaRMSNorm: (1+w) * x / rms(x)  (the base build_norm computes w * x / rms(x), missing the +1)
+    Qcur = ggml_rms_norm(ctx0, Qcur, hparams.f_norm_rms_eps);
+    if (layer.attn_q_norm) {
+        ggml_tensor * w_q = layer.attn_q_norm;
+        if (w_q->type != Qcur->type) w_q = ggml_cast(ctx0, w_q, Qcur->type);
+        Qcur = ggml_add(ctx0, Qcur, ggml_mul(ctx0, Qcur, w_q));
+    }
     cb(Qcur, "Qcur_normed", il);
 
     //
@@ -398,6 +404,21 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         ggml_row_size(Qcur->type, head_dim) * n_head,
         ggml_row_size(Qcur->type, n_rot));
     cb(q_nope, "q_nope", il);
+
+    //
+    // 2b. Scale q_nope by (1+w_nope) BEFORE absorption.
+    //     The vllm reference folds (1+w_nope) into kv_b_proj using the NOPE slice of the
+    //     k_norm weight (k_norm.weight[rope_dim:]). Since we absorb with the raw wk_b, we
+    //     apply the same per-dim scale to q_nope here. q_nope is a view of Qcur, so this
+    //     must happen before the absorption permute below.
+    //
+    if (layer.attn_k_norm) {
+        ggml_tensor * w_nope = ggml_view_1d(ctx0, layer.attn_k_norm, qk_nope, (size_t)n_rot * ggml_element_size(layer.attn_k_norm));
+        w_nope = ggml_cont(ctx0, w_nope);
+        if (w_nope->type != q_nope->type) w_nope = ggml_cast(ctx0, w_nope, q_nope->type);
+        q_nope = ggml_add(ctx0, q_nope, ggml_mul(ctx0, q_nope, w_nope));
+        cb(q_nope, "q_nope_scaled", il);
+    }
 
     //
     // 3. Q absorption: Q_absorbed[d,h,t] = sum_p W_UK[h][d,p] * q_nope[p,h,t]
@@ -433,6 +454,18 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
         cb(k_rope, "k_rope_raw", il);
 
+        // Apply (1+w_rope) to k_rope BEFORE RoPE. The vllm reference scales the rope key by
+        // (1 + k_norm.weight[:n_rot]) before rotation (rotation mixes dims, so the per-dim
+        // scale must be applied first). k_rope is [n_rot, n_kv_base, n_tokens]; the [n_rot]
+        // weight broadcasts over the 4 KV groups (they share the same rope dims).
+        if (layer.attn_k_norm) {
+            ggml_tensor * w_rope = ggml_view_1d(ctx0, layer.attn_k_norm, n_rot, 0);
+            w_rope = ggml_cont(ctx0, w_rope);
+            if (w_rope->type != k_rope->type) w_rope = ggml_cast(ctx0, w_rope, k_rope->type);
+            k_rope = ggml_add(ctx0, k_rope, ggml_mul(ctx0, k_rope, w_rope));
+            cb(k_rope, "k_rope_scaled", il);
+        }
+
         // Apply RoPE to q_pe and k_rope
         q_pe = ggml_rope_multi(
                 ctx0, q_pe, inp_pos, nullptr,
@@ -447,17 +480,58 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         cb(k_rope, "k_rope_rope", il);
 
         //
-        // 5. Pack K cache: [latent | k_rope] → [rank + n_rot*n_kv_base, 1, n_tokens]
-        //    The KV cache stores this packed tensor (MQA, single "head")
+        // 5. Pack K cache: [latent | k_rope | rms] → [rank + n_rot*n_kv_base + n_head, 1, n_tokens]
+        //    The KV cache stores this packed tensor (MQA, single "head"). The trailing
+        //    n_head floats hold the per-(token, head) RMS of the RAW assembled key, used to
+        //    rescale the absorbed attention logits (the 1/rms factor commutes with the
+        //    rotation, so it is deferred to the logits).
         //
-        // Reshape latent to 3D: [rank, 1, n_tokens]
+        // Per-(token, head) RMS of the RAW key (before (1+w) scaling and RoPE):
+        //   rms[h,t] = sqrt( (sum_p k_nope_raw[p,h,t]^2 + sum_d kr_raw[d, h/n_heads_per_group, t]^2) / head_dim + eps )
+        // where k_nope_raw = wk_b_raw @ latent and kr_raw is the raw rope key (pre-scaling).
+        // The KV cache row already reserves +n_head for this tail (see llama-kv-cache.cpp).
+        ggml_tensor * k_rms = nullptr;
+        if (layer.wk_b_raw) {
+            // k_nope_raw: [qk_nope, n_head, n_tokens] (raw up-projection, no (1+w_nope))
+            ggml_tensor * k_nope_raw = ggml_mul_mat(ctx0, layer.wk_b_raw, latent);
+            k_nope_raw = ggml_reshape_3d(ctx0, k_nope_raw, qk_nope, n_head, n_tokens);
+            cb(k_nope_raw, "k_nope_raw", il);
+            // sum of squares over the nope dims -> [1, n_head, n_tokens]
+            ggml_tensor * nope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, k_nope_raw));
+            // rope sum of squares over the rope dims -> [1, n_kv_base, n_tokens] (raw, pre-scaling)
+            ggml_tensor * kr_raw_3d = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
+            ggml_tensor * rope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, kr_raw_3d));
+            // expand the rope sum to the 24 query heads: head h uses rope group h / n_heads_per_group
+            const int64_t n_heads_per_group = n_head / n_kv_base;
+            ggml_tensor * rope_sq_4d = ggml_reshape_4d(ctx0, rope_sq, 1, n_kv_base, 1, n_tokens);
+            ggml_tensor * rope_sq_h = ggml_repeat_4d(ctx0, rope_sq_4d, 1, n_kv_base, n_heads_per_group, n_tokens);
+            rope_sq_h = ggml_reshape_3d(ctx0, rope_sq_h, 1, n_head, n_tokens); // [1, n_head, n_tokens]
+            // combine: [1, n_head, n_tokens]
+            ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_h);
+            // rms = sqrt(sumsq / head_dim + eps)
+            sumsq = ggml_scale(ctx0, sumsq, 1.0f / (float)head_dim);
+            ggml_tensor * eps_c = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+            ggml_set_f32(eps_c, hparams.f_norm_rms_eps);
+            sumsq = ggml_add(ctx0, sumsq, eps_c);
+            k_rms = ggml_sqrt(ctx0, sumsq);                        // [1, n_head, n_tokens]
+            k_rms = ggml_reshape_2d(ctx0, k_rms, n_head, n_tokens); // [n_head, n_tokens]
+            cb(k_rms, "k_rms", il);
+        } else {
+            LLAMA_LOG_WARN("[MLA] il=%d: wk_b_raw missing, skipping per-head RMS (absorbed logits unrescaled)\n", il);
+        }
+
+        // Reshape latent to 2D: [rank, n_tokens]
         ggml_tensor * latent_2d = ggml_reshape_2d(ctx0, latent, rank, n_tokens);
         // Reshape k_rope to 2D: [n_rot*n_kv_base, n_tokens]
         ggml_tensor * k_rope_2d_packed = ggml_reshape_2d(ctx0, k_rope, n_rot * n_kv_base, n_tokens);
         // Concatenate: [rank + n_rot*n_kv_base, n_tokens]
         ggml_tensor * K_packed_2d = ggml_concat(ctx0, latent_2d, k_rope_2d_packed, 0);
-        // Reshape to [rank + n_rot*n_kv_base, 1, n_tokens] for KV cache
-        ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, rank + n_rot * n_kv_base, 1, n_tokens);
+        // Append the per-head RMS tail: [rank + n_rot*n_kv_base + n_head, n_tokens]
+        if (k_rms) {
+            K_packed_2d = ggml_concat(ctx0, K_packed_2d, k_rms, 0);
+        }
+        // Reshape to [rank + n_rot*n_kv_base + n_head, 1, n_tokens] for KV cache
+        ggml_tensor * K_packed = ggml_reshape_3d(ctx0, K_packed_2d, K_packed_2d->ne[0], 1, n_tokens);
         cb(K_packed, "K_packed", il);
 
         //
