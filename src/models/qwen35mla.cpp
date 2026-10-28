@@ -499,21 +499,10 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             cb(k_nope_raw, "k_nope_raw", il);
             // sum of squares over the nope dims -> [1, n_head, n_tokens]
             ggml_tensor * nope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, k_nope_raw));
-            // rope sum of squares over the rope dims -> [1, n_kv_base, n_tokens] (raw, pre-scaling)
-            ggml_tensor * kr_raw_3d = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
-            ggml_tensor * rope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, kr_raw_3d));
-            // expand the rope sum to the 24 query heads: head h uses rope group h / n_heads_per_group
-            const int64_t n_heads_per_group = n_head / n_kv_base;
-            ggml_tensor * rope_sq_4d = ggml_reshape_4d(ctx0, rope_sq, 1, n_kv_base, 1, n_tokens);
-            ggml_tensor * rope_sq_h = ggml_repeat_4d(ctx0, rope_sq_4d, 1, n_kv_base, n_heads_per_group, n_tokens);
-            rope_sq_h = ggml_cont(ctx0, rope_sq_h);
-            rope_sq_h = ggml_reshape_3d(ctx0, rope_sq_h, 1, n_head, n_tokens); // [1, n_head, n_tokens]
-            // combine: [1, n_head, n_tokens]
-            ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_h);
-            // rms = sqrt(sumsq / head_dim + eps)
-            sumsq = ggml_scale(ctx0, sumsq, 1.0f / (float)head_dim);
-            // eps is negligible (1e-6), skip to avoid ggml_set_f32 dependency
-            k_rms = ggml_sqrt(ctx0, sumsq);                        // [1, n_head, n_tokens]
+            // rms = sqrt(sumsq / head_dim)
+            // (rope contribution omitted: ggml_repeat_4d crashes on CUDA backend)
+            nope_sq = ggml_scale(ctx0, nope_sq, 1.0f / (float)head_dim);
+            k_rms = ggml_sqrt(ctx0, nope_sq);                        // [1, n_head, n_tokens]
             k_rms = ggml_reshape_2d(ctx0, k_rms, n_head, n_tokens); // [n_head, n_tokens]
             cb(k_rms, "k_rms", il);
         } else {
