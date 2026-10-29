@@ -3057,17 +3057,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_cont(ctx0, s);
 
                 // Read per-head RMS from KV cache tail
-                // K tensor: [head_k, n_tokens_kv, 1, n_batch] where head_k = rank + n_rot*4 + n_head
-                // RMS is at offset (rank + n_rot*4), shape [n_head, n_tokens_kv]
+                // K tensor: [head_k, 1, n_tokens_kv, n_stream] where head_k = rank + n_rot*4 + n_head
+                // RMS is at offset (rank + n_rot*4) in dim 0, shape [n_head, 1, n_tokens_kv, n_stream]
                 const int64_t rms_offset = rank + n_rot * n_kv_base;
-                ggml_tensor * rms_full = ggml_view_1d(ctx0, k, n_head * n_tokens_kv, (size_t)rms_offset * k->nb[0]);
+                // 4D view: [n_head, 1, n_tokens_kv, n_stream] with correct strides from K
+                ggml_tensor * rms_4d = ggml_view_4d(ctx0, k, n_head, 1, n_tokens_kv, 1,
+                        k->nb[0], (size_t)rms_offset * k->nb[0], k->nb[2], 0);
+                rms_4d = ggml_cont(ctx0, rms_4d);
                 // Reshape to [n_head, n_tokens_kv]
-                rms_full = ggml_reshape_2d(ctx0, rms_full, n_head, n_tokens_kv);
+                ggml_tensor * rms_full = ggml_reshape_2d(ctx0, rms_4d, n_head, n_tokens_kv);
                 // Transpose to [n_tokens_kv, n_head]
                 rms_full = ggml_transpose(ctx0, rms_full);
+                rms_full = ggml_cont(ctx0, rms_full);
                 // Per KV tile: view [kv_chunk, n_head] at offset kv_start
                 ggml_tensor * rms_tile = ggml_view_2d(ctx0, rms_full, kv_chunk, n_head, rms_full->nb[1], (size_t)kv_start * rms_full->nb[1]);
-                rms_tile = ggml_cont(ctx0, rms_tile); // contiguous (required by ggml_reshape_4d)
+                rms_tile = ggml_cont(ctx0, rms_tile);
                 // Reshape to [kv_chunk, 1, n_head, 1] for broadcasting
                 rms_tile = ggml_reshape_4d(ctx0, rms_tile, kv_chunk, 1, n_head, 1);
                 rms_tile = ggml_cont(ctx0, rms_tile);
