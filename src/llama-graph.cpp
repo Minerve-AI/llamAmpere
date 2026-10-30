@@ -3057,12 +3057,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 s = ggml_cont(ctx0, s);
 
                 // Read per-head RMS from KV cache tail
-                // K tensor: [head_k, 1, n_tokens_kv, n_stream] where head_k = rank + n_rot*4 + n_head
-                // RMS is at offset (rank + n_rot*4) in dim 0, shape [n_head, 1, n_tokens_kv, n_stream]
+                // K tensor after permute: [head_k, n_tokens_kv, 1, n_batch]
+                // RMS is at element offset (rank + n_rot*n_kv_base) in dim 0, n_head values per token
                 const int64_t rms_offset = rank + n_rot * n_kv_base;
-                // 4D view: [n_head, 1, n_tokens_kv, n_stream] with correct strides from K
+                // 4D view: [n_head, 1, n_tokens_kv, 1] with correct strides from K
+                // nb1 = element stride (between heads), nb2 = token stride, offset = start of RMS tail
                 ggml_tensor * rms_4d = ggml_view_4d(ctx0, k, n_head, 1, n_tokens_kv, 1,
-                        k->nb[0], (size_t)rms_offset * k->nb[0], k->nb[2], 0);
+                        k->nb[0], k->nb[1], 0, (size_t)rms_offset * k->nb[0]);
                 rms_4d = ggml_cont(ctx0, rms_4d);
                 // Reshape to [n_head, n_tokens_kv]
                 ggml_tensor * rms_full = ggml_reshape_2d(ctx0, rms_4d, n_head, n_tokens_kv);

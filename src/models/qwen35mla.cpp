@@ -453,6 +453,8 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
 
         ggml_tensor * k_rope = ggml_reshape_3d(ctx0, k_rope_2d, n_rot, n_kv_base, n_tokens);
         cb(k_rope, "k_rope_raw", il);
+        // Save raw k_rope (pre-scaling, pre-RoPE) for RMS computation
+        ggml_tensor * k_rope_raw_3d = k_rope;
 
         // Apply (1+w_rope) to k_rope BEFORE RoPE. The vllm reference scales the rope key by
         // (1 + k_norm.weight[:n_rot]) before rotation (rotation mixes dims, so the per-dim
@@ -499,11 +501,26 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             cb(k_nope_raw, "k_nope_raw", il);
             // sum of squares over the nope dims -> [1, n_head, n_tokens]
             ggml_tensor * nope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, k_nope_raw));
-            // rms = sqrt(sumsq / head_dim)
-            // (rope contribution omitted: ggml_repeat_4d crashes on CUDA backend)
-            nope_sq = ggml_scale(ctx0, nope_sq, 1.0f / (float)head_dim);
-            k_rms = ggml_sqrt(ctx0, nope_sq);                        // [1, n_head, n_tokens]
-            k_rms = ggml_reshape_2d(ctx0, k_rms, n_head, n_tokens); // [n_head, n_tokens]
+            nope_sq = ggml_reshape_2d(ctx0, nope_sq, n_head, n_tokens); // [n_head, n_tokens]
+
+            // Rope contribution: sum_d kr_raw[d, group(h), t]^2 for each head h
+            // kr_raw = k_rope_raw_3d: [n_rot, n_kv_base, n_tokens]
+            ggml_tensor * rope_sq = ggml_sum_rows(ctx0, ggml_sqr(ctx0, k_rope_raw_3d));
+            rope_sq = ggml_reshape_2d(ctx0, rope_sq, n_kv_base, n_tokens); // [n_kv_base, n_tokens]
+
+            // Broadcast each rope group to all heads in that group:
+            // [n_kv_base, n_tokens] -> [n_kv_base, 1, n_tokens] -> repeat -> [n_kv_base, n_heads_per_group, n_tokens] -> [n_head, n_tokens]
+            const int64_t n_heads_per_group = n_head / n_kv_base;
+            ggml_tensor * rope_sq_3d = ggml_reshape_3d(ctx0, rope_sq, n_kv_base, 1, n_tokens);
+            ggml_tensor * rope_sq_rep = ggml_repeat(ctx0, rope_sq_3d, n_kv_base, n_heads_per_group, n_tokens);
+            rope_sq_rep = ggml_reshape_2d(ctx0, rope_sq_rep, n_head, n_tokens); // [n_head, n_tokens]
+
+            // sumsq = nope_sq + rope_sq_rep
+            ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_rep);
+            // rms = sqrt(sumsq / head_dim + eps)
+            sumsq = ggml_scale(ctx0, sumsq, 1.0f / (float)head_dim);
+            sumsq = ggml_add(ctx0, sumsq, ggml_new_f32(ctx0, hparams.f_norm_rms_eps));
+            k_rms = ggml_sqrt(ctx0, sumsq); // [n_head, n_tokens]
             cb(k_rms, "k_rms", il);
         } else {
             LLAMA_LOG_WARN("[MLA] il=%d: wk_b missing, skipping per-head RMS (absorbed logits unrescaled)\n", il);
