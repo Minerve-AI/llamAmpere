@@ -3065,6 +3065,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 ggml_tensor * rms_4d = ggml_view_4d(ctx0, k, n_head, 1, n_tokens_kv, 1,
                         k->nb[0], k->nb[1], 0, (size_t)rms_offset * k->nb[0]);
                 rms_4d = ggml_cont(ctx0, rms_4d);
+                // KV cache may be f16; cast to f32 to match scores tensor
+                if (rms_4d->type != GGML_TYPE_F32) {
+                    rms_4d = ggml_cast(ctx0, rms_4d, GGML_TYPE_F32);
+                }
                 // Reshape to [n_head, n_tokens_kv]
                 ggml_tensor * rms_full = ggml_reshape_2d(ctx0, rms_4d, n_head, n_tokens_kv);
                 // Transpose to [n_tokens_kv, n_head]
