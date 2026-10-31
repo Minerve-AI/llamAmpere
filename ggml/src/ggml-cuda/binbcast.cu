@@ -290,6 +290,24 @@ static void launch_bin_bcast_pack(const ggml_tensor * src0, const ggml_tensor * 
         GGML_ASSERT(nb02 % sizeof(src0_t) == 0);
         GGML_ASSERT(nb03 % sizeof(src0_t) == 0);
 
+        if (nb10 % sizeof(src1_t) != 0) {
+            fprintf(stderr, "[BINBCRASH] op dst=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s\n",
+                ggml_op_name(dst->op), dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3], ggml_type_name(dst->type));
+            fprintf(stderr, "[BINBCRASH] src0=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s cont=%d trans=%d\n",
+                ggml_op_name(src0->op), src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3], ggml_type_name(src0->type),
+                ggml_is_contiguous(src0), ggml_is_transposed(src0));
+            fprintf(stderr, "[BINBCRASH] src1=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%s cont=%d trans=%d\n",
+                ggml_op_name(src1->op), src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+                src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3], ggml_type_name(src1->type),
+                ggml_is_contiguous(src1), ggml_is_transposed(src1));
+            fprintf(stderr, "[BINBCRASH] cnb1=[%zu,%zu,%zu,%zu] cne1=[%lld,%lld,%lld,%lld] src1_t_size=%zu nb10=%zu\n",
+                cnb1[0], cnb1[1], cnb1[2], cnb1[3],
+                cne1[0], cne1[1], cne1[2], cne1[3],
+                sizeof(src1_t), nb10);
+            fflush(stderr);
+        }
         GGML_ASSERT(nb10 % sizeof(src1_t) == 0);
         GGML_ASSERT(nb11 % sizeof(src1_t) == 0);
         GGML_ASSERT(nb12 % sizeof(src1_t) == 0);
