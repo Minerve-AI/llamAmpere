@@ -512,7 +512,9 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             // [n_kv_base, n_tokens] -> [n_kv_base, 1, n_tokens] -> repeat -> [n_kv_base, n_heads_per_group, n_tokens] -> [n_head, n_tokens]
             const int64_t n_heads_per_group = n_head / n_kv_base;
             ggml_tensor * rope_sq_3d = ggml_reshape_3d(ctx0, rope_sq, n_kv_base, 1, n_tokens);
-            ggml_tensor * rope_sq_rep = ggml_repeat(ctx0, rope_sq_3d, n_kv_base, n_heads_per_group, n_tokens);
+            // Use nope_sq reshaped as the target shape for ggml_repeat
+            ggml_tensor * rope_target = ggml_reshape_3d(ctx0, nope_sq, n_kv_base, n_heads_per_group, n_tokens);
+            ggml_tensor * rope_sq_rep = ggml_repeat(ctx0, rope_sq_3d, rope_target);
             rope_sq_rep = ggml_reshape_2d(ctx0, rope_sq_rep, n_head, n_tokens); // [n_head, n_tokens]
 
             // sumsq = nope_sq + rope_sq_rep
