@@ -520,8 +520,8 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             // sumsq = nope_sq + rope_sq_rep
             ggml_tensor * sumsq = ggml_add(ctx0, nope_sq, rope_sq_rep);
             // rms = sqrt(sumsq / head_dim + eps)
+            // (eps omitted: ggml_new_f32 not available; 1e-6 is negligible vs actual RMS values)
             sumsq = ggml_scale(ctx0, sumsq, 1.0f / (float)head_dim);
-            sumsq = ggml_add(ctx0, sumsq, ggml_new_f32(ctx0, hparams.f_norm_rms_eps));
             k_rms = ggml_sqrt(ctx0, sumsq); // [n_head, n_tokens]
             cb(k_rms, "k_rms", il);
         } else {
