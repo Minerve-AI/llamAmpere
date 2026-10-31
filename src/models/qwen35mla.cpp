@@ -426,19 +426,22 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     //    Result: [rank, n_head, n_tokens]
     //
     {
-        // Reshape wk_b: [r, N*P] → [r, P, N]  (W_reshaped[d,p,h] = W[d, h*P+p])
-        ggml_tensor * wk_b_3d = ggml_reshape_3d(ctx0, layer.wk_b, rank, qk_nope, n_head);
-        // Permute: [r, P, N] → [P, r, N]  (A[p,d,h] = W_UK[h][d,p])
+        // Reshape wk_b: [r, N*P] → [r, N, P] = [rank, n_head, qk_nope]
+        // W_3d[d, h, p] = W[d, h*P + p] = W_UK[h][d, p]  ✓
+        ggml_tensor * wk_b_3d = ggml_reshape_3d(ctx0, layer.wk_b, rank, n_head, qk_nope);
+        // Permute: [r, N, P] → [r, P, N] = [rank, qk_nope, n_head]
+        // A[d, p, h] = W_UK[h][d, p]  ✓
         // Dequantize to F16 before matmul: ggml_mul_mat rejects quantized tensors
         // with nb[0] > nb[1] ("transposed"), which is always the case after permute.
-        // F16 tensors don't have the block-based layout constraint.
-        ggml_tensor * wk_b_perm = ggml_permute(ctx0, wk_b_3d, 1, 0, 2, 3);
+        ggml_tensor * wk_b_perm = ggml_permute(ctx0, wk_b_3d, 0, 2, 1, 3);
         ggml_tensor * wk_b_t = ggml_cast(ctx0, wk_b_perm, GGML_TYPE_F16);
-        // Permute q_nope: [P, N, n_tokens] → [P, n_tokens, N]  (B[p,t,h] = q_nope[p,h,t])
+        // Permute q_nope: [P, N, T] → [P, T, N] = [qk_nope, n_tokens, n_head]
+        // B[p, t, h] = q_nope[p, h, t]  ✓
         ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
-        // Batched matmul: result[d,t,h] = sum_p A[p,d,h]*B[p,t,h] → [r, n_tokens, N]
+        // Batched matmul: [r, P, N] @ [P, T, N] → [r, T, N]
+        // C[d, t, h] = sum_p A[d,p,h] * B[p,t,h]  ✓
         ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
-        // Permute: [r, n_tokens, N] → [r, N, n_tokens]
+        // Permute: [r, T, N] → [r, N, T] = [rank, n_head, n_tokens]
         ggml_tensor * Q_absorbed = ggml_permute(ctx0, Q_abs_3d, 0, 2, 1, 3);
         cb(Q_absorbed, "Q_absorbed", il);
 
