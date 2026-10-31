@@ -426,21 +426,31 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     //    Result: [rank, n_head, n_tokens]
     //
     {
-        // Reshape wk_b: [r, N*P] → [r, N, P] = [rank, n_head, qk_nope]
-        // W_3d[d, h, p] = W[d, h*P + p] = W_UK[h][d, p]  ✓
-        ggml_tensor * wk_b_3d = ggml_reshape_3d(ctx0, layer.wk_b, rank, n_head, qk_nope);
-        // Permute: [r, N, P] → [r, P, N] = [rank, qk_nope, n_head]
-        // A[d, p, h] = W_UK[h][d, p]  ✓
-        // Dequantize to F16 before matmul: ggml_mul_mat rejects quantized tensors
-        // with nb[0] > nb[1] ("transposed"), which is always the case after permute.
-        ggml_tensor * wk_b_perm = ggml_permute(ctx0, wk_b_3d, 0, 2, 1, 3);
-        ggml_tensor * wk_b_t = ggml_cast(ctx0, wk_b_perm, GGML_TYPE_F16);
+        // Q absorption: Q_absorbed[d,t,h] = sum_p W_UK[h][d,p] * q_nope[p,h,t]
+        //
+        // This ggml version uses convention: ggml_mul_mat(A,B) requires A->ne[0]==B->ne[0]
+        // Result: [A->ne[1], B->ne[1], B->ne[2], B->ne[3]]
+        // So A = [K, M, batch] and B = [K, N, batch], C = [M, N, batch]
+        //
+        // We need: A[p,d,h] = W_UK[h][d,p] = wk_b[d, h*P+p]
+        //   A shape: [P, r, N] = [qk_nope, rank, n_head]
+        //   B shape: [P, T, N] = [qk_nope, n_tokens, n_head]
+        //   C shape: [r, T, N] = [rank, n_tokens, n_head]
+        //
+        // Cast to F16 first (avoids quantized stride constraints), then view with correct strides.
+        ggml_tensor * wk_b_f16 = ggml_cast(ctx0, layer.wk_b, GGML_TYPE_F16); // [r, N*P] F16 contig
+        // View: A[p,d,h] = wk_b_f16[d, h*P+p]
+        //   nb[0] = 2 (F16 elem), nb[1] = (N*P)*2 (stride for d), nb[2] = P*2 (stride for h)
+        ggml_tensor * wk_b_view = ggml_view_3d(ctx0, wk_b_f16, qk_nope, rank, n_head,
+            n_head * qk_nope * 2,  // nb1: stride for d (rank dim) in bytes
+            qk_nope * 2,           // nb2: stride for h (n_head dim) in bytes
+            0);                    // offset
         // Permute q_nope: [P, N, T] → [P, T, N] = [qk_nope, n_tokens, n_head]
-        // B[p, t, h] = q_nope[p, h, t]  ✓
+        // B[p, t, h] = q_nope[p, h, t]
         ggml_tensor * q_nope_p = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
-        // Batched matmul: [r, P, N] @ [P, T, N] → [r, T, N]
-        // C[d, t, h] = sum_p A[d,p,h] * B[p,t,h]  ✓
-        ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_t, q_nope_p);
+        // Batched matmul: A[P,r,N] @ B[P,T,N] → C[r,T,N]
+        // C[d,t,h] = sum_p A[p,d,h] * B[p,t,h]
+        ggml_tensor * Q_abs_3d = ggml_mul_mat(ctx0, wk_b_view, q_nope_p);
         // Permute: [r, T, N] → [r, N, T] = [rank, n_head, n_tokens]
         ggml_tensor * Q_absorbed = ggml_permute(ctx0, Q_abs_3d, 0, 2, 1, 3);
         cb(Q_absorbed, "Q_absorbed", il);
