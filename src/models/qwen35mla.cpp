@@ -487,15 +487,18 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         }
 
         // Apply RoPE to q_pe and k_rope
+        // MLA uses standard NeoX RoPE (32 freqs over 64 dims), NOT M-RoPE/IM-RoPE.
+        // vLLM reference: get_rope(256, is_neox_style=True, prf=0.25)
+        int neox_sections[4] = {0, 0, 0, 0};
         q_pe = ggml_rope_multi(
                 ctx0, q_pe, inp_pos, nullptr,
-                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                n_rot, neox_sections, GGML_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow);
         cb(q_pe, "q_pe_rope", il);
 
         k_rope = ggml_rope_multi(
                 ctx0, k_rope, inp_pos, nullptr,
-                n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                n_rot, neox_sections, GGML_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow);
         cb(k_rope, "k_rope_rope", il);
 
