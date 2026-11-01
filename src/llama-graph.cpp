@@ -3060,6 +3060,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                 // K tensor after permute: [head_k, n_tokens_kv, 1, n_batch]
                 // RMS is at element offset (rank + n_rot*n_kv_base) in dim 0, n_head values per token
                 const int64_t rms_offset = rank + n_rot * n_kv_base;
+                LLAMA_LOG_ERROR("[MLA-RMS] il=%d: k->ne[0]=%lld rms_offset=%lld rms_end=%lld in_bounds=%d\n",
+                    il, (long long)k->ne[0], (long long)rms_offset, (long long)(rms_offset + n_head),
+                    (int)(rms_offset + n_head <= k->ne[0]));
                 // 4D view: [n_head, 1, n_tokens_kv, 1] with correct strides from K
                 // nb1 = element stride (between heads), nb2 = token stride, offset = start of RMS tail
                 ggml_tensor * rms_4d = ggml_view_4d(ctx0, k, n_head, 1, n_tokens_kv, 1,

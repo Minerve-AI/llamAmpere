@@ -50,8 +50,13 @@ void llama_model_qwen35mla::load_arch_hparams(llama_model_loader & ml) {
                 max_rank = hparams.mla_kv_lora_rank_arr[i];
             }
         }
-        hparams.n_embd_head_k_mla_impl = max_rank + rope_dim * n_kv_base;
+        // KV cache must store: [latent | k_rope | rms_tail]
+        // rms_tail has n_head values (per-head RMS of the raw key)
+        hparams.n_embd_head_k_mla_impl = max_rank + rope_dim * n_kv_base + hparams.n_head();
         hparams.n_embd_head_v_mla_impl = max_rank; // V dim (latent), not actually stored
+        LLAMA_LOG_ERROR("[MLA-META] KV cache: head_k=%u (latent=%u + rope=%u + rms=%u) head_v=%u\n",
+            hparams.n_embd_head_k_mla_impl, max_rank, rope_dim * n_kv_base, hparams.n_head(),
+            hparams.n_embd_head_v_mla_impl);
 
         // KV cache uses single "head" (MQA): the latent is shared across all Q heads
         // Only applies to main model layers, NOT the MTP layer (which uses standard GQA)
