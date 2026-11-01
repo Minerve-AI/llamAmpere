@@ -577,8 +577,11 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
             K_packed->nb[1], K_packed->nb[2], 0);
         cb(V_latent, "V_latent", il);
 
-        // Reshape wv_b: [rank, head_dim*n_head] → [rank, head_dim, n_head] for v_mla
-        ggml_tensor * wv_b_3d = ggml_reshape_3d(ctx0, layer.wv_b, rank, head_dim, n_head);
+        // Reshape wv_b: [rank, n_head*head_dim] → [rank, n_head, head_dim] → permute → [rank, head_dim, n_head]
+        // The GGUF layout is [d, h*head_dim + v], so reshape to [rank, n_head, head_dim] first,
+        // then permute to [rank, head_dim, n_head] for the v_mla matmul.
+        ggml_tensor * wv_b_3d = ggml_reshape_3d(ctx0, layer.wv_b, rank, n_head, head_dim);
+        wv_b_3d = ggml_permute(ctx0, wv_b_3d, 0, 2, 1, 3);
 
         ggml_tensor * attn_raw = build_attn(inp,
                     nullptr, nullptr, nullptr,
