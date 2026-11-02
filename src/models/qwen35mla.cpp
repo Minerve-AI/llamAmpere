@@ -363,7 +363,8 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
     const int64_t rank      = hparams.mla_kv_lora_rank_arr[il];
     const int64_t head_dim  = hparams.n_embd_head_v();   // 256
     const int64_t n_head    = hparams.n_head();           // 24
-    const int64_t n_rot     = hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot();
+    // vLLM uses get_rope(256, prf=0.25) -> rotary_dim=64, regardless of config mla_qk_rope_head_dim=58
+    const int64_t n_rot     = 64;
     const int64_t qk_nope   = head_dim - n_rot;
     const int64_t n_kv_base = 4;                          // base model KV heads for rope
 
