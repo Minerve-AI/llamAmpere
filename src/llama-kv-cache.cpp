@@ -303,8 +303,8 @@ llama_kv_cache::llama_kv_cache(
         }
 
         if (n_embd_head_k_all == 0) {
-            n_embd_head_k_all = (int32_t) (is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4) : hparams.n_embd_head_k(il));
-        } else if (n_embd_head_k_all > 0 && n_embd_head_k_all != (int32_t) (is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4) : hparams.n_embd_head_k(il))) {
+            n_embd_head_k_all = (int32_t) (is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4 + hparams.n_head(il)) : hparams.n_embd_head_k(il));
+        } else if (n_embd_head_k_all > 0 && n_embd_head_k_all != (int32_t) (is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4 + hparams.n_head(il)) : hparams.n_embd_head_k(il))) {
             n_embd_head_k_all = -1;
         }
 
@@ -347,7 +347,7 @@ llama_kv_cache::llama_kv_cache(
         // head_dim_k=192), pad each head to the next multiple of 128. The padded zeros don't
         // affect dot products since WHT preserves inner products:
         //   <WHT(Q_padded), WHT(K_padded)> = <Q_padded, K_padded> = <Q, K> + <0, 0> = <Q, K>
-        const uint32_t n_embd_head_k = is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4) : hparams.n_embd_head_k(il);
+        const uint32_t n_embd_head_k = is_mla ? (hparams.mla_kv_lora_rank_arr[il] + (hparams.mla_qk_rope_head_dim > 0 ? hparams.mla_qk_rope_head_dim : hparams.n_rot()) * 4 + hparams.n_head(il)) : hparams.n_embd_head_k(il);
 
 
         const bool has_k = true;
