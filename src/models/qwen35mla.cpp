@@ -489,15 +489,18 @@ ggml_tensor * llama_model_qwen35mla::graph::build_layer_attn_mla(
         // Apply RoPE to q_pe and k_rope
         // MLA uses standard NeoX RoPE (32 freqs over 64 dims), NOT M-RoPE/IM-RoPE.
         // vLLM reference: get_rope(256, is_neox_style=True, prf=0.25)
+        // inp_pos is [n_tokens * n_pos_per_embd] (4 sections for hybrid DeltaNet);
+        // extract the 1D temporal section (first n_tokens) for standard RoPE.
+        ggml_tensor * pos_1d = ggml_view_1d(ctx0, inp_pos, n_tokens, 0);
         int neox_sections[4] = {0, 0, 0, 0};
         q_pe = ggml_rope_multi(
-                ctx0, q_pe, inp_pos, nullptr,
+                ctx0, q_pe, pos_1d, nullptr,
                 n_rot, neox_sections, GGML_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow);
         cb(q_pe, "q_pe_rope", il);
 
         k_rope = ggml_rope_multi(
-                ctx0, k_rope, inp_pos, nullptr,
+                ctx0, k_rope, pos_1d, nullptr,
                 n_rot, neox_sections, GGML_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow);
         cb(k_rope, "k_rope_rope", il);
